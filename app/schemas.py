@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel
@@ -38,3 +39,35 @@ class TrackIn(BaseModel):
 class TrackAccepted(BaseModel):
     id: str
     status: str = "accepted"
+
+
+class DeliveryOut(BaseModel):
+    id: str
+    destination_id: str
+    destination_type: str
+    status: str
+    attempts: int
+    last_error: str | None
+    delivered_at: datetime | None
+    next_attempt_at: datetime
+
+
+class EventDetail(BaseModel):
+    id: str
+    type: str
+    payload: dict
+    received_at: datetime
+    deliveries: list[DeliveryOut]
+
+
+class ReplayResult(BaseModel):
+    replayed: int
+
+
+class DestinationStats(BaseModel):
+    destination_id: str
+    pending: int
+    delivering: int
+    delivered: int
+    dead: int
+    avg_attempts: float | None

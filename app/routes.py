@@ -1,15 +1,21 @@
+from datetime import UTC, datetime
+
 from fastapi import APIRouter, Depends, Header, HTTPException, Response, status
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import generate_write_key, hash_key, require_source
 from app.db import get_db
 from app.fanout import build_deliveries, matching_destinations
-from app.models import Destination, Event, Source
+from app.models import Delivery, Destination, Event, Source
 from app.schemas import (
+    DeliveryOut,
     DestinationCreate,
     DestinationCreated,
+    DestinationStats,
+    EventDetail,
+    ReplayResult,
     SourceCreate,
     SourceCreated,
     TrackAccepted,
@@ -113,3 +119,78 @@ async def track(
         response.status_code = status.HTTP_200_OK  # 200 = "already had it", not freshly accepted
 
     return TrackAccepted(id=event_id)
+
+
+@router.get("/events/{event_id}", response_model=EventDetail)
+async def get_event(event_id: str, db: AsyncSession = Depends(get_db)):
+    """Everything about one event: its payload and every delivery's current
+    state and history. This is what you hand a customer who says 'we never
+    got it' — the honest answer, not a guess."""
+    event = await db.get(Event, event_id)
+    if event is None:
+        raise HTTPException(status_code=404, detail="event not found")
+    rows = await db.execute(
+        select(Delivery, Destination.type)
+        .join(Destination, Delivery.destination_id == Destination.id)
+        .where(Delivery.event_id == event_id)
+    )
+    deliveries = [
+        DeliveryOut(
+            id=d.id,
+            destination_id=d.destination_id,
+            destination_type=dest_type,
+            status=d.status,
+            attempts=d.attempts,
+            last_error=d.last_error,
+            delivered_at=d.delivered_at,
+            next_attempt_at=d.next_attempt_at,
+        )
+        for d, dest_type in rows
+    ]
+    return EventDetail(
+        id=event.id,
+        type=event.type,
+        payload=event.payload,
+        received_at=event.received_at,
+        deliveries=deliveries,
+    )
+
+
+@router.post("/destinations/{destination_id}/replay", response_model=ReplayResult)
+async def replay_destination(destination_id: str, db: AsyncSession = Depends(get_db)):
+    """Reset every 'dead' delivery for this destination back to pending, so the
+    worker picks them up again. For recovering after an outage is fixed."""
+    if await db.get(Destination, destination_id) is None:
+        raise HTTPException(status_code=404, detail="destination not found")
+    result = await db.execute(
+        update(Delivery)
+        .where(Delivery.destination_id == destination_id, Delivery.status == "dead")
+        .values(status="pending", attempts=0, next_attempt_at=datetime.now(UTC))
+    )
+    await db.commit()
+    return ReplayResult(replayed=result.rowcount)
+
+
+@router.get("/destinations/{destination_id}/stats", response_model=DestinationStats)
+async def destination_stats(destination_id: str, db: AsyncSession = Depends(get_db)):
+    """Delivery counts by status, plus average attempts (a proxy for how
+    flaky this destination has been)."""
+    if await db.get(Destination, destination_id) is None:
+        raise HTTPException(status_code=404, detail="destination not found")
+    rows = await db.execute(
+        select(Delivery.status, func.count(), func.avg(Delivery.attempts))
+        .where(Delivery.destination_id == destination_id)
+        .group_by(Delivery.status)
+    )
+    counts = {"pending": 0, "delivering": 0, "delivered": 0, "dead": 0}
+    total_attempts = 0.0
+    total_rows = 0
+    for st, n, avg_attempts in rows:
+        counts[st] = n
+        total_attempts += (avg_attempts or 0) * n
+        total_rows += n
+    return DestinationStats(
+        destination_id=destination_id,
+        avg_attempts=(total_attempts / total_rows) if total_rows else None,
+        **counts,
+    )
