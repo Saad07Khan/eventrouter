@@ -21,5 +21,11 @@ class Settings(BaseSettings):
     claim_batch: int = 50                 # max deliveries claimed per loop
     claim_timeout_seconds: float = 60.0   # a 'delivering' row older than this is reclaimed
 
+    # --- Backpressure (Step 7) ---
+    worker_concurrency: int = 16          # max deliveries in flight at once (global)
+    destination_concurrency: int = 5      # max in flight to any ONE destination
+    circuit_fail_threshold: int = 10      # consecutive failures before a circuit opens
+    circuit_cooldown_seconds: float = 300.0  # how long a destination stays "cold"
+
 
 settings = Settings()

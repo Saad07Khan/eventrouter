@@ -108,3 +108,21 @@ class Delivery(Base):
     # The worker's claim query filters on status and next_attempt_at, ordered by
     # next_attempt_at. This composite index is that query's access path.
     __table_args__ = (Index("ix_deliveries_claim", "status", "next_attempt_at"),)
+
+
+class WarehouseEvent(Base):
+    """The 'data warehouse' sink. Batched destinations write here in bulk.
+
+    Stands in for an external warehouse / S3 — same DB, different table. Keyed by
+    delivery_id so re-writing a batch is idempotent (ON CONFLICT DO NOTHING),
+    which is what lets us retry a whole failed batch without double-inserting.
+    """
+
+    __tablename__ = "warehouse_events"
+
+    delivery_id: Mapped[str] = mapped_column(String, primary_key=True)
+    event_id: Mapped[str] = mapped_column(String, nullable=False)
+    destination_id: Mapped[str] = mapped_column(String, nullable=False)
+    type: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    written_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

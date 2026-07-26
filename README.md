@@ -32,8 +32,10 @@ accepted event).
 
 Built step by step. Done: **0** skeleton · **1** ingest (auth + idempotency) ·
 **2** fan-out · **3** worker (SKIP LOCKED claim, retries, backoff, dead-letter,
-crash recovery) · **4** transform · **5** Slack + 429 handling.
-Next: **6** batching · **7** backpressure · **8** deploy + UI.
+crash recovery) · **4** transform · **5** Slack + 429 handling · **6** batching
+(size/window flush, idempotent bulk sink) · **7** backpressure (per-destination
+concurrency caps + circuit breaker).
+Next: **8** replay + stats + deploy + UI.
 
 ## Tech
 
