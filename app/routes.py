@@ -1,12 +1,20 @@
-from fastapi import APIRouter, Depends, Header, Response, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Response, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import generate_write_key, hash_key, require_source
 from app.db import get_db
-from app.models import Event, Source
-from app.schemas import SourceCreate, SourceCreated, TrackAccepted, TrackIn
+from app.fanout import build_deliveries, matching_destinations
+from app.models import Destination, Event, Source
+from app.schemas import (
+    DestinationCreate,
+    DestinationCreated,
+    SourceCreate,
+    SourceCreated,
+    TrackAccepted,
+    TrackIn,
+)
 
 router = APIRouter(prefix="/v1")
 
@@ -21,6 +29,26 @@ async def create_source(body: SourceCreate, db: AsyncSession = Depends(get_db)):
     return SourceCreated(id=source.id, name=source.name, write_key=raw_key)
 
 
+@router.post("/destinations", response_model=DestinationCreated, status_code=status.HTTP_201_CREATED)
+async def create_destination(body: DestinationCreate, db: AsyncSession = Depends(get_db)):
+    """Register a destination for a source. Matched against events by its filter."""
+    if await db.get(Source, body.source_id) is None:
+        raise HTTPException(status_code=404, detail="source not found")
+    dest = Destination(
+        source_id=body.source_id,
+        type=body.type,
+        config=body.config,
+        filter=body.filter,
+        transform=body.transform,
+        batch_size=body.batch_size,
+        batch_window_s=body.batch_window_s,
+        enabled=body.enabled,
+    )
+    db.add(dest)
+    await db.commit()
+    return DestinationCreated(id=dest.id, type=dest.type, filter=dest.filter)
+
+
 @router.post("/track", response_model=TrackAccepted, status_code=status.HTTP_202_ACCEPTED)
 async def track(
     body: TrackIn,
@@ -33,6 +61,11 @@ async def track(
 
     202 (not 200) is deliberate: we've taken responsibility for the event, but
     we have NOT delivered it yet. The status code is an honest promise.
+
+    The event AND its delivery rows are written in ONE transaction. If we saved
+    the event first and crashed before saving deliveries, we'd have an accepted
+    event with nowhere to go — silent data loss, the exact thing this service
+    exists to prevent. One transaction makes a half-done state impossible.
     """
     # Capture the id as a plain string NOW, while `source` is still loaded.
     # A rollback below expires every ORM object in the session; touching
@@ -48,13 +81,18 @@ async def track(
     )
     db.add(event)
     try:
+        # flush() sends the event INSERT (and trips the unique constraint on a
+        # duplicate) WITHOUT committing yet. If it survives, we fan out into the
+        # same open transaction, then commit event + deliveries together.
+        await db.flush()
+        destinations = await matching_destinations(db, source_id, body.type)
+        db.add_all(build_deliveries(event.id, destinations))
         await db.commit()
-        event_id = event.id  # not expired (expire_on_commit=False)
+        event_id = event.id
     except IntegrityError:
-        # Another request already inserted this (source_id, idempotency_key).
-        # We let the DB's unique constraint arbitrate the race, then return the
-        # event that won. This is why dedup is correct even under concurrency:
-        # a check-then-insert in Python could not do this safely.
+        # Duplicate (source_id, idempotency_key): the original event already
+        # created its deliveries, so we roll this whole attempt back (no extra
+        # deliveries) and return the event that won.
         await db.rollback()
         existing = await db.scalar(
             select(Event).where(
