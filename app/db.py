@@ -6,7 +6,16 @@ from sqlalchemy.orm import DeclarativeBase
 from app.config import settings
 
 # One engine (connection pool) for the whole process.
-engine = create_async_engine(settings.database_url, pool_size=10)
+#
+# connect_args go straight to asyncpg:
+#   ssl="require"  -> Neon (like most cloud Postgres) refuses non-SSL connections.
+#                     We set it here in code instead of in the URL, because asyncpg
+#                     does not understand libpq's ?sslmode= query parameter.
+engine = create_async_engine(
+    settings.database_url,
+    pool_size=10,
+    connect_args={"ssl": "require"},
+)
 
 # A session factory. Each request gets its own session from here.
 #
