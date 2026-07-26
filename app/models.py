@@ -45,7 +45,9 @@ class Event(Base):
     type: Mapped[str] = mapped_column(String, nullable=False)  # e.g. "user.signed_up"
     payload: Mapped[dict] = mapped_column(JSONB, nullable=False)  # arbitrary shape
     idempotency_key: Mapped[str | None] = mapped_column(String, nullable=True)
-    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    received_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
 
     # The database enforces "one event per (source, idempotency_key)".
     # This is what makes dedup correct even when two requests race — the DB,
@@ -66,7 +68,7 @@ class Destination(Base):
     type: Mapped[str] = mapped_column(String, nullable=False)  # "http" | "slack" | "warehouse"
     config: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)  # url, token, ...
     filter: Mapped[str] = mapped_column(String, nullable=False, default="*")  # e.g. "user.*"
-    transform: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)  # used in Step 4
+    transform: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)  # Step 4
     batch_size: Mapped[int] = mapped_column(Integer, nullable=False, default=1)  # 1 = immediate
     batch_window_s: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
@@ -95,6 +97,10 @@ class Delivery(Base):
     next_attempt_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
+    # When a worker claimed this row (set to 'delivering'). Used to reclaim rows
+    # orphaned by a worker that crashed mid-delivery: a 'delivering' row older
+    # than claim_timeout is fair game again.
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_error: Mapped[str | None] = mapped_column(String, nullable=True)
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

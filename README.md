@@ -30,7 +30,10 @@ accepted event).
 
 ## Status
 
-Built step by step. Currently: **Step 0 — skeleton + health check.**
+Built step by step. Done: **0** skeleton · **1** ingest (auth + idempotency) ·
+**2** fan-out · **3** worker (SKIP LOCKED claim, retries, backoff, dead-letter,
+crash recovery) · **4** transform · **5** Slack + 429 handling.
+Next: **6** batching · **7** backpressure · **8** deploy + UI.
 
 ## Tech
 
@@ -43,5 +46,9 @@ python3.13 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
 
-uvicorn app.main:app --reload      # http://localhost:8000/health
+uvicorn app.main:app --reload      # terminal 1: API  -> http://localhost:8000
+python -m app.worker               # terminal 2: delivery worker
 ```
+
+Two processes, one Postgres. The API accepts events; the worker delivers them.
+Run, restart, or crash either independently.

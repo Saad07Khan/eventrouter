@@ -13,5 +13,13 @@ class Settings(BaseSettings):
     # SQLAlchemy async URL. The "+asyncpg" part picks the async driver.
     database_url: str = "postgresql+asyncpg://localhost/event_pipeline"
 
+    # --- Worker tuning (env-overridable; tests use fast values) ---
+    retry_base_seconds: float = 10.0      # first retry delay; doubles each attempt
+    retry_cap_seconds: float = 3600.0     # never wait longer than this between attempts
+    retry_max_attempts: int = 8           # after this many failed attempts -> dead
+    poll_interval_seconds: float = 5.0    # how long to sleep when there's no work
+    claim_batch: int = 50                 # max deliveries claimed per loop
+    claim_timeout_seconds: float = 60.0   # a 'delivering' row older than this is reclaimed
+
 
 settings = Settings()

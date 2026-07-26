@@ -15,6 +15,7 @@ from app.schemas import (
     TrackAccepted,
     TrackIn,
 )
+from app.transform import JMESPathError, validate_transform
 
 router = APIRouter(prefix="/v1")
 
@@ -29,11 +30,19 @@ async def create_source(body: SourceCreate, db: AsyncSession = Depends(get_db)):
     return SourceCreated(id=source.id, name=source.name, write_key=raw_key)
 
 
-@router.post("/destinations", response_model=DestinationCreated, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/destinations", response_model=DestinationCreated, status_code=status.HTTP_201_CREATED
+)
 async def create_destination(body: DestinationCreate, db: AsyncSession = Depends(get_db)):
     """Register a destination for a source. Matched against events by its filter."""
     if await db.get(Source, body.source_id) is None:
         raise HTTPException(status_code=404, detail="source not found")
+    # Validate transform expressions now, so a typo fails here (with a human
+    # watching) instead of silently producing nulls during delivery.
+    try:
+        validate_transform(body.transform)
+    except (JMESPathError, ValueError, TypeError) as exc:
+        raise HTTPException(status_code=422, detail=f"invalid transform: {exc}") from exc
     dest = Destination(
         source_id=body.source_id,
         type=body.type,
