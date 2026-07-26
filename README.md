@@ -1,9 +1,11 @@
-# Event Pipeline
+# EventRouter
 
-Ingest an event once, deliver it to many destinations — each with its own
+A backend service that reliably delivers events to multiple destinations.
+Ingest an event once, fan it out to many destinations — each with its own
 transform, batching, and independent retry state.
 
-One event in, N differently-shaped deliveries out, N independent failure states.
+One event in, N differently-shaped deliveries out, N independent failure states,
+with retries, exponential backoff, batching, and dead-lettering.
 Think Segment / RudderStack, scoped to the interesting core.
 
 ## Architecture

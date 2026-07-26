@@ -1,5 +1,5 @@
 [project]
-name = "event-pipeline"
+name = "eventrouter"
 version = "0.1.0"
 description = "Ingest an event once, deliver it to many destinations, each with its own transform, batching, and retry state."
 requires-python = ">=3.12"
