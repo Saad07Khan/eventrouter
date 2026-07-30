@@ -13,6 +13,11 @@ class Settings(BaseSettings):
     # SQLAlchemy async URL. The "+asyncpg" part picks the async driver.
     database_url: str = "postgresql+asyncpg://localhost/event_pipeline"
 
+    # Cloud Postgres (Neon, RDS, ...) requires SSL; a local/dev Postgres in
+    # Docker usually has no TLS at all and refuses the connection if we insist.
+    # Set DATABASE_SSL=false for local Postgres.
+    database_ssl: bool = True
+
     # --- Worker tuning (env-overridable; tests use fast values) ---
     retry_base_seconds: float = 10.0      # first retry delay; doubles each attempt
     retry_cap_seconds: float = 3600.0     # never wait longer than this between attempts

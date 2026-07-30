@@ -7,14 +7,15 @@ from app.config import settings
 
 # One engine (connection pool) for the whole process.
 #
-# connect_args go straight to asyncpg:
-#   ssl="require"  -> Neon (like most cloud Postgres) refuses non-SSL connections.
-#                     We set it here in code instead of in the URL, because asyncpg
-#                     does not understand libpq's ?sslmode= query parameter.
+# connect_args go straight to asyncpg. SSL is set here in code rather than in
+# the URL because asyncpg does not understand libpq's ?sslmode= query
+# parameter — passing Neon's connection string verbatim fails for that reason.
+connect_args = {"ssl": "require"} if settings.database_ssl else {}
+
 engine = create_async_engine(
     settings.database_url,
     pool_size=10,
-    connect_args={"ssl": "require"},
+    connect_args=connect_args,
 )
 
 # A session factory. Each request gets its own session from here.

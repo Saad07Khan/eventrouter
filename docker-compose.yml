@@ -1,0 +1,51 @@
+# Runs the whole system locally: Postgres, migrations, the API, and the worker.
+#
+# Note the API and the worker are SEPARATE services here, which is the real
+# architecture — two processes sharing one database and nothing else. (The
+# single-container start.sh exists only to fit a free hosting tier on one
+# instance.) You can `docker compose stop worker` and watch deliveries queue
+# up in Postgres, then start it again and watch them drain.
+
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: eventrouter
+      POSTGRES_PASSWORD: eventrouter
+      POSTGRES_DB: eventrouter
+    ports:
+      - "5432:5432"
+    healthcheck:
+      # Other services wait for this, so they don't race Postgres's startup.
+      test: ["CMD-SHELL", "pg_isready -U eventrouter"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  migrate:
+    build: .
+    command: alembic upgrade head
+    environment: &env
+      DATABASE_URL: postgresql+asyncpg://eventrouter:eventrouter@db:5432/eventrouter
+      DATABASE_SSL: "false"  # local Postgres has no TLS; Neon requires it
+    depends_on:
+      db:
+        condition: service_healthy
+
+  api:
+    build: .
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    environment: *env
+    ports:
+      - "8000:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  worker:
+    build: .
+    command: python -m app.worker
+    environment: *env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully

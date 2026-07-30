@@ -8,7 +8,8 @@ One event in, N differently-shaped deliveries out, N independent failure states,
 with retries, exponential backoff, batching, and dead-lettering.
 Think Segment / RudderStack, scoped to the interesting core.
 
-**Live:** _(deployed at the end of this README, once up)_
+Run the whole thing locally with `docker compose up` — see
+[Running locally](#running-locally).
 
 ## The problem
 
@@ -153,18 +154,36 @@ pytest + respx · ruff · GitHub Actions
 
 ## Running locally
 
+Everything — Postgres, migrations, API, worker — in one command:
+
+```bash
+docker compose up
+```
+
+Then open http://localhost:8000/docs.
+
+Compose runs the API and the worker as **separate services**, which is the
+real architecture. To see the queue do its job, stop the worker and send some
+events — they pile up as `pending` rows in Postgres — then start it again and
+watch them drain:
+
+```bash
+docker compose stop worker
+docker compose start worker
+```
+
+Without Docker:
+
 ```bash
 python3.13 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
-cp .env.example .env   # fill in DATABASE_URL
+cp .env.example .env   # set DATABASE_URL (and DATABASE_SSL=false for local PG)
 
 alembic upgrade head
 uvicorn app.main:app --reload      # terminal 1: API  -> http://localhost:8000
 python -m app.worker               # terminal 2: delivery worker
 ```
-
-Two processes, one Postgres. The API accepts events; the worker delivers them.
 
 ## Known limitations
 
