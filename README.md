@@ -52,44 +52,68 @@ effect on the warehouse.
 
 ## Design decisions
 
-**The queue is a Postgres table rather than Redis or Celery.** Saving the event
-and creating its delivery rows has to be one atomic step. Split across two
-systems, a crash in between leaves an accepted event that nothing will ever
-deliver, which is the exact failure this service exists to prevent. Two systems
-cannot share a transaction. One database can.
+**Queue lives in Postgres, not Redis or Celery.** Two systems cannot share one
+transaction.
 
-**Concurrent workers claim work with `FOR UPDATE SKIP LOCKED`.** A worker locks
-the rows it takes, and a second worker skips past locked rows instead of waiting
-behind them. Without `SKIP LOCKED` two workers deliver the same webhook twice.
-Without `FOR UPDATE` they block each other and running two is pointless.
+```
+  Redis queue                       Postgres queue
+  ───────────                       ──────────────
+  INSERT event    ──► committed     BEGIN
+       ✗ crash                        INSERT event
+  ENQUEUE job     ──► never ran       INSERT deliveries
+                                    COMMIT
+  accepted event, nothing
+  will ever deliver it              all or nothing
+```
 
-**Retries back off exponentially with jitter.** Plain backoff means everything
-that failed at 9:00 retries at 9:00:10 together, hitting a recovering server
-with a synchronized wave. Randomising each delay spreads them out.
+**Workers claim with `FOR UPDATE SKIP LOCKED`.** Both halves are load bearing.
 
-**Batches flush on size or on elapsed time, whichever comes first.** Size alone
-lets twelve rows wait forever for a five hundredth that never arrives. Time
-alone turns a traffic spike into one enormous write.
+```
+                        worker A        worker B
+  plain SELECT          takes 1-50      takes 1-50    same webhook twice
+  FOR UPDATE            locks 1-50      blocks...     2 workers, 1x speed
+  FOR UPDATE            locks 1-50      takes 51-100  ✓
+    SKIP LOCKED
+```
 
-**A failed batch is retried whole, not split into per-row state.** The sink
-write is idempotent (`ON CONFLICT DO NOTHING` on delivery id), so re-sending
-rows that already landed costs nothing. Tracking which rows in a batch failed
-is real machinery for a rare case.
+**Backoff carries jitter.**
 
-**Transforms are JMESPath expressions, not user-supplied code.** Running
-customer code on your own server means sandboxing it, and that is a much harder
-problem than this project needs. JMESPath can reshape data and nothing else.
+```
+  no jitter    500 fail at 9:00:00  ──►  all retry at 9:00:10   second outage
+  jitter       500 fail at 9:00:00  ──►  spread over 9:00:05-15  ✓
+```
 
-**One bad destination cannot stall the others.** Two things are needed here, and
-I found that out the hard way. A per-destination concurrency cap stops one
-endpoint from occupying every worker slot. Separately, the claim loop spawns
-deliveries as tasks instead of awaiting the batch, because awaiting meant a
-single hanging request froze the loop from picking up new work at all. Fixing
-only the first one is not enough.
+**Batches flush on size or elapsed time, first one wins.**
 
-Worth being clear about what this is not: with a single Postgres as the source
-of truth there is no consensus, leader election, or split brain to handle. The
-problems here are concurrency and partial failure.
+```
+  size only     12 rows wait forever for a 500th that never arrives
+  window only   traffic spike ──► one 50,000 row write
+  both          500 rows OR 30s   ✓
+```
+
+**A failed batch retries whole.** The sink write is idempotent
+(`ON CONFLICT DO NOTHING` on delivery id), so rows that already landed cost
+nothing to resend. Per-row state inside a batch is machinery for a rare case.
+
+**Transforms are JMESPath, not user code.** Running customer code means
+sandboxing arbitrary execution, a much harder problem than this needs.
+JMESPath reshapes data and does nothing else.
+
+**One slow destination cannot stall the others.** This took two fixes, and the
+first one alone looked like it should have been enough.
+
+```
+  destination A hangs 30s, B and C healthy, 6 events each
+
+  per-destination cap only     A: 0   B: 1   C: 1    loop still stuck
+  + spawn deliveries as tasks  A: 0   B: 6   C: 6    ✓
+```
+
+The cap stops A occupying every worker slot. But the claim loop was awaiting
+the whole batch, so one hanging request also froze it from picking up new work.
+
+With a single Postgres as the source of truth there is no consensus, leader
+election, or split brain here. The problems are concurrency and partial failure.
 
 ## API
 
