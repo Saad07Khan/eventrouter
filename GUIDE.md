@@ -299,6 +299,190 @@ alembic/
 things. **When to merge:** when two files always change together. Do not create
 structure in anticipation.
 
+## 2.4 What goes where, and why
+
+The listing above says what each file is. This says what belongs **inside** each
+one, and just as importantly what does not.
+
+| File | Belongs here | Does NOT belong here |
+|---|---|---|
+| `main.py` | App object, router registration, health/root routes | Business logic, database queries |
+| `config.py` | Settings fields and their defaults | Anything that reads the database, any logic |
+| `db.py` | Engine, session factory, `Base`, `get_db` | Models, queries |
+| `models.py` | Table definitions, columns, constraints, indexes | Query functions, HTTP concerns, business rules |
+| `schemas.py` | Request and response shapes | Database access, logic |
+| `auth.py` | Key hashing, key generation, the auth dependency | Route handlers |
+| `routes.py` | HTTP handling: parse, call, return, choose status codes | Delivery logic, retry rules, anything a worker needs |
+| `fanout.py` | Matching destinations, building delivery rows | HTTP, sending anything |
+| `transform.py` | Payload reshaping and validation of mappings | Network calls, database access |
+| `destinations.py` | How to send to each destination type | When to send, retry decisions, database access |
+| `worker.py` | Claim loop, orchestration, retry decisions | How to format a Slack message |
+| `batcher.py` | Batch accumulation and flushing | Immediate delivery |
+| `circuit.py` | Failure counting and cooldown state | Anything about deliveries specifically |
+
+**The test for any new code: what is the one sentence that describes this
+file's job?** If your new function does not fit that sentence, it goes
+elsewhere. If you cannot write the sentence, the file is doing too much.
+
+Two examples from this project:
+
+- `destinations.py` knows *how* to send. `worker.py` knows *when* to send and
+  what to do when it fails. That split is why adding a destination type is one
+  function plus one dict entry, touching no retry logic.
+- `circuit.py` counts failures against arbitrary string keys. It does not know
+  what a delivery is. That is why it is 45 lines and trivially testable.
+
+### The layering rule
+
+Imports flow one direction. Nothing lower imports anything higher.
+
+```
+        routes.py          worker.py       batcher.py
+             │                  │               │
+             ├──────────┬───────┴───────┬───────┤
+             ▼          ▼               ▼       ▼
+         auth.py   fanout.py    destinations.py  circuit.py
+             │          │          transform.py
+             └──────────┴───────┬───────┘
+                                ▼
+                            models.py
+                                │
+                                ▼
+                              db.py
+                                │
+                                ▼
+                            config.py
+```
+
+`config.py` imports nothing from the project. `models.py` imports only `db.py`.
+`routes.py` and `worker.py` sit at the top and import freely downward.
+
+**Why this matters:** if `models.py` imported `routes.py` you would get a
+circular import, which in Python fails at import time with a confusing error.
+More importantly, one-directional layering means you can read the project bottom
+up and never need to have read the later files to understand the earlier ones.
+
+**The sign you have it wrong:** you add an import and get
+`ImportError: cannot import name X from partially initialized module`. That is
+Python telling you two files depend on each other. The fix is almost never a
+local import inside a function; it is that a piece of code is in the wrong file.
+
+### A request traced through the files
+
+`POST /v1/track` with an idempotency key:
+
+```
+1.  uvicorn            receives the raw HTTP bytes
+2.  main.py            app routes it to the /v1 router
+3.  schemas.py         TrackIn validates the JSON body        -> 422 if malformed
+4.  db.py              get_db() opens a session
+5.  auth.py            require_source() hashes the bearer key,
+                       looks up the Source                    -> 401 if unknown
+6.  routes.py          track() runs
+7.  models.py          Event(...) is constructed
+8.  routes.py          db.flush()  sends the INSERT           -> IntegrityError if dupe
+9.  fanout.py          matching_destinations() globs the filters
+10. fanout.py          build_deliveries() makes N rows
+11. routes.py          db.commit()  event + deliveries together
+12. schemas.py         TrackAccepted serialises the response
+13. db.py              session closes (dependency teardown)
+14. uvicorn            writes 202 back to the client
+```
+
+Fourteen steps, eight files, and no file does two jobs. Trace this once by hand
+and the structure stops feeling arbitrary.
+
+The worker's path is separate and shorter:
+
+```
+worker.py  claim()          ->  SQL, gets delivery ids
+worker.py  load()           ->  joins delivery + destination + event
+transform.py apply_transform()
+destinations.py deliver_http() / deliver_slack()
+worker.py  record_result()  ->  delivered | pending+retry | dead
+circuit.py record()         ->  maybe open the circuit
+```
+
+### Naming conventions
+
+| Convention | Example | Note |
+|---|---|---|
+| Files and functions | `snake_case` | `fanout.py`, `compute_delay` |
+| Classes | `PascalCase` | `Delivery`, `CircuitBreaker` |
+| Constants | `SCREAMING_SNAKE` | `CLAIM_SQL`, `DELIVERERS`, `TIMEOUT` |
+| Private helpers | leading underscore | `_send`, `_sign`, `_is_due`, `_dest_sem` |
+| Table names | plural snake_case | `deliveries`, `warehouse_events` |
+| Model classes | singular | `Delivery` the class, `deliveries` the table |
+| Schemas | intent-suffixed | `SourceCreate` in, `SourceCreated` out |
+| Booleans | read as a statement | `enabled`, `ok` |
+| Timestamps | `_at` suffix | `created_at`, `delivered_at`, `next_attempt_at` |
+| Durations | unit suffix | `batch_window_s`, `retry_base_seconds` |
+
+The leading underscore is a convention, not enforcement. Python does not stop
+you calling `_send()` from another module; it signals that you should not, and
+that its signature may change without notice.
+
+**Putting the unit in the name** (`batch_window_s`, `claim_timeout_seconds`) is
+worth the extra characters. `timeout = 30` invites the question "thirty what",
+and that question has caused real outages.
+
+### How this compares to Flask and Django
+
+Most people meet Flask first, so here is the mapping.
+
+| Concept | Flask | FastAPI (this project) |
+|---|---|---|
+| App object | `app = Flask(__name__)` | `app = FastAPI()` |
+| Route | `@app.route("/x", methods=["POST"])` | `@router.post("/x")` |
+| Grouping routes | Blueprints | `APIRouter` |
+| Reading the body | `request.get_json()`, validate by hand | Type-annotated pydantic model, validated automatically |
+| Reading a header | `request.headers["X"]` | `x: str = Header(...)` in the signature |
+| Shared setup (db session) | `g` object plus `before_request` | `Depends(get_db)` |
+| Validation errors | You write them | Automatic 422 with field-level detail |
+| API docs | Extension, or by hand | Generated from type hints at `/docs` |
+| Async | Bolted on later, limited | Native |
+
+**The structural difference that matters:** Flask hands you `request` as a
+global you reach into. FastAPI declares what a route needs in its signature and
+passes it in. That is why FastAPI route functions are testable as plain
+functions and why dependencies compose without middleware.
+
+**Versus Django**, which is opinionated where this is not: Django gives you an
+ORM, admin, auth, and a prescribed app layout out of the box. FastAPI gives you
+routing and validation, and you assemble the rest. For a service like this,
+assembling is the right trade. For a content-heavy site with a lot of CRUD
+screens, Django's batteries would save real time.
+
+**A Flask habit worth dropping:** in Flask tutorials it is normal to see
+database queries inside route functions with logic mixed in. That works until
+you need the same logic from a background worker, at which point it is stuck
+behind an HTTP request. This project keeps delivery logic in `worker.py` and
+`destinations.py` precisely so the worker can use it with no HTTP involved.
+
+### Where would you put a new feature?
+
+Practice questions. Answers below.
+
+1. Add a `POST /v1/destinations/{id}/pause` endpoint.
+2. Add a new destination type for Discord.
+3. Change retries from 8 attempts to 5.
+4. Add a `region` field to every event.
+5. Add a rule that events over 1MB are rejected.
+
+<br>
+
+1. `routes.py`. It is HTTP handling over an existing column (`enabled`).
+2. `destinations.py`: one `deliver_discord` function plus a `DELIVERERS` entry.
+   Also add `"discord"` to the `Literal` in `schemas.py`. Nothing else changes.
+3. `config.py`, one default. Nothing else, which is the payoff of not
+   hardcoding it.
+4. `models.py` for the column, `schemas.py` if it is client-supplied, then an
+   Alembic migration. Three places, in that order.
+5. `schemas.py` as a pydantic validator, so it is rejected at the boundary
+   before any handler runs.
+
+If those felt obvious, the structure is doing its job.
+
 ---
 ---
 
