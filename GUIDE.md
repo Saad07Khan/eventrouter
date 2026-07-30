@@ -27,7 +27,8 @@ in the project. Blocks with no filename are illustrative.
 | 1 | What the product is and why it exists |
 | 2 | The stack, and what each piece does |
 | 3 | Database concepts you need |
-| 4 | Building it, file by file |
+| 4 | Building it, step by step |
+| 4B | The remaining code: every other file, Alembic, Docker, CI |
 | 5 | The hard concepts, in depth |
 | 6 | Testing |
 | 7 | Bugs hit while building, and what they teach |
@@ -1215,6 +1216,645 @@ Reset `attempts` to 0 so replayed deliveries get a full fresh retry budget.
 `GET /v1/events/{id}` returns the event plus every delivery's status and attempt
 history. This is the endpoint you point at when a customer says "we never got
 it." The honest answer is right there, not a guess.
+
+---
+---
+
+# Part 4B: The remaining code
+
+Part 4 followed the build order and covered the interesting path. This part
+covers everything it skipped, so every file in the project is explained.
+
+## 4B.1 The remaining models
+
+### `Destination`
+
+```python
+class Destination(Base):
+    __tablename__ = "destinations"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: _id("dst"))
+    source_id: Mapped[str] = mapped_column(ForeignKey("sources.id"), nullable=False, index=True)
+    type: Mapped[str] = mapped_column(String, nullable=False)        # http | slack | warehouse
+    config: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    filter: Mapped[str] = mapped_column(String, nullable=False, default="*")
+    transform: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    batch_size: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    batch_window_s: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+```
+
+**Why `config` is JSONB.** Each destination type needs different settings. HTTP
+wants `url` and `secret`, Slack wants `webhook_url`, a warehouse might want a
+table name. Typed columns for all of them would mean a wide table full of NULLs,
+and a new column every time you add a type. JSONB holds whatever that type
+needs.
+
+**`batch_size = 1` means immediate.** This single field is what splits the two
+delivery paths. The worker's claim query filters `WHERE dst.batch_size = 1`; the
+batcher takes `> 1`. One integer, no separate flag, no duplicated logic.
+
+**`default=dict` not `default={}`.** A mutable default like `{}` is evaluated
+once and shared between every row, which is the classic Python mutable-default
+bug. Passing the `dict` function means a fresh empty dict per row.
+
+**`enabled` gives you a pause button.** Set it false and fan-out skips this
+destination without deleting its history.
+
+### `WarehouseEvent`
+
+```python
+class WarehouseEvent(Base):
+    __tablename__ = "warehouse_events"
+
+    delivery_id: Mapped[str] = mapped_column(String, primary_key=True)
+    event_id: Mapped[str] = mapped_column(String, nullable=False)
+    destination_id: Mapped[str] = mapped_column(String, nullable=False)
+    type: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    written_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+```
+
+This stands in for an external warehouse or S3 bucket. Same database, different
+table, so the project stays runnable with one dependency.
+
+**`delivery_id` as the primary key is the important bit.** It is what makes
+`ON CONFLICT (delivery_id) DO NOTHING` work, which is what makes the batch write
+idempotent, which is what lets a failed batch be retried whole. The whole
+argument in Part 5.5 rests on this one choice of key.
+
+**Note the absent foreign keys.** `event_id` and `destination_id` are plain
+strings here, not `ForeignKey`. This table pretends to be an external system, and
+an external warehouse would not have referential integrity back into your
+operational tables.
+
+## 4B.2 The remaining schemas
+
+```python
+class DestinationCreate(BaseModel):
+    source_id: str
+    type: Literal["http", "slack", "warehouse"]
+    config: dict = {}
+    filter: str = "*"
+    transform: dict = {}
+    batch_size: int = 1
+    batch_window_s: int = 0
+    enabled: bool = True
+```
+
+**`Literal["http", "slack", "warehouse"]` is free validation.** Any other value
+is rejected with a 422 before your code runs, and the accepted values show up in
+the generated API docs automatically. Cheaper and clearer than an enum here.
+
+**Defaults on the schema mean a minimal request works.** A caller can send just
+`source_id` and `type`, and get an immediate, unfiltered, untransformed
+destination.
+
+```python
+class DeliveryOut(BaseModel):
+    id: str
+    destination_id: str
+    destination_type: str
+    status: str
+    attempts: int
+    last_error: str | None
+    delivered_at: datetime | None
+    next_attempt_at: datetime
+
+
+class EventDetail(BaseModel):
+    id: str
+    type: str
+    payload: dict
+    received_at: datetime
+    deliveries: list[DeliveryOut]
+```
+
+**Nested models.** `EventDetail` contains a list of `DeliveryOut`, and pydantic
+serialises the whole tree. `datetime` fields become ISO-8601 strings in the JSON
+automatically.
+
+**`destination_type` is on the delivery, not the destination.** It comes from a
+join. Someone reading a delivery log wants to know it was a Slack delivery
+without a second lookup.
+
+## 4B.3 The remaining routes
+
+### `create_source`
+
+```python
+@router.post("/sources", response_model=SourceCreated, status_code=status.HTTP_201_CREATED)
+async def create_source(body: SourceCreate, db: AsyncSession = Depends(get_db)):
+    raw_key = generate_write_key()
+    source = Source(name=body.name, write_key_hash=hash_key(raw_key))
+    db.add(source)
+    await db.commit()
+    return SourceCreated(id=source.id, name=source.name, write_key=raw_key)
+```
+
+The whole security design in six lines. `raw_key` exists only inside this
+function and in the response. The database gets `hash_key(raw_key)`. There is no
+code path anywhere that can show the key again, because the information does not
+exist to show. That is the point.
+
+**`201 Created`** because a new resource now exists at a new identity. Compare
+with `202` on `/track`, which promises future work rather than announcing a
+resource.
+
+### `create_destination`
+
+```python
+@router.post("/destinations", response_model=DestinationCreated, status_code=201)
+async def create_destination(body: DestinationCreate, db: AsyncSession = Depends(get_db)):
+    if await db.get(Source, body.source_id) is None:
+        raise HTTPException(status_code=404, detail="source not found")
+    try:
+        validate_transform(body.transform)
+    except (JMESPathError, ValueError, TypeError) as exc:
+        raise HTTPException(status_code=422, detail=f"invalid transform: {exc}") from exc
+    dest = Destination(...)
+    db.add(dest)
+    await db.commit()
+    return DestinationCreated(id=dest.id, type=dest.type, filter=dest.filter)
+```
+
+**`db.get(Model, pk)`** is the shortcut for a primary-key lookup. It checks the
+session's identity map first and only queries if it has to. Use it whenever you
+are fetching by primary key.
+
+**Two validations, two status codes.** A missing source is `404` (you referenced
+something that does not exist). A bad transform is `422` (what you sent is
+malformed). Getting these right is small but it is what a careful API looks like.
+
+**`raise ... from exc`** preserves the original exception as the cause, so the
+traceback shows both the JMESPath error and the HTTP error. Without `from`, you
+lose the underlying reason.
+
+### `get_event`
+
+```python
+@router.get("/events/{event_id}", response_model=EventDetail)
+async def get_event(event_id: str, db: AsyncSession = Depends(get_db)):
+    event = await db.get(Event, event_id)
+    if event is None:
+        raise HTTPException(status_code=404, detail="event not found")
+    rows = await db.execute(
+        select(Delivery, Destination.type)
+        .join(Destination, Delivery.destination_id == Destination.id)
+        .where(Delivery.event_id == event_id)
+    )
+    deliveries = [DeliveryOut(..., destination_type=dest_type, ...) for d, dest_type in rows]
+    return EventDetail(..., deliveries=deliveries)
+```
+
+**Selecting an entity and a column together.** `select(Delivery, Destination.type)`
+returns rows you unpack as `for d, dest_type in rows`, where `d` is a full
+`Delivery` object and `dest_type` is a plain string. Useful when you want one
+model plus a field from a joined table.
+
+**Why this endpoint matters more than it looks.** This is what you open when a
+customer says "we never received the event." It shows every attempt, every
+error, and when the next retry is due. Support answered from data instead of
+guesswork.
+
+### `destination_stats`
+
+```python
+rows = await db.execute(
+    select(Delivery.status, func.count(), func.avg(Delivery.attempts))
+    .where(Delivery.destination_id == destination_id)
+    .group_by(Delivery.status)
+)
+counts = {"pending": 0, "delivering": 0, "delivered": 0, "dead": 0}
+total_attempts = 0.0
+total_rows = 0
+for st, n, avg_attempts in rows:
+    counts[st] = n
+    total_attempts += (avg_attempts or 0) * n
+    total_rows += n
+return DestinationStats(
+    destination_id=destination_id,
+    avg_attempts=(total_attempts / total_rows) if total_rows else None,
+    **counts,
+)
+```
+
+**`GROUP BY` with aggregates.** One query returns one row per status with its
+count and average attempts, instead of four separate count queries.
+
+**Recombining a weighted average.** The database gives an average *per status
+group*. To get the overall average you cannot average the averages, because the
+groups have different sizes. Multiply each group's average by its count, sum
+those, divide by the total. This is a small statistics trap worth internalising.
+
+**`counts` is pre-seeded with zeros** so a status with no rows reports 0 rather
+than being missing from the response. Consistent response shape matters to
+whoever is parsing it.
+
+**`**counts`** unpacks the dict into keyword arguments, which works because the
+dict keys exactly match the schema's field names.
+
+## 4B.4 `destinations.py` in full
+
+```python
+async def deliver_http(payload: dict, config: dict) -> DeliveryResult:
+    url = config.get("url")
+    if not url:
+        return DeliveryResult(ok=False, error="destination config missing 'url'")
+    body = json.dumps(payload).encode()
+    headers = {"Content-Type": "application/json"}
+    secret = config.get("secret")
+    if secret:
+        headers["X-Signature"] = _sign(secret, body)
+    return await _send(url, body, headers)
+```
+
+**A missing `url` returns a failure, it does not raise.** Config comes from user
+input, so a bad config is expected, not exceptional. It flows through the same
+retry and dead-letter machinery as a network failure, and the error message ends
+up in `last_error` where someone can see it.
+
+**`json.dumps(payload).encode()` produces bytes once**, and those exact bytes are
+both signed and sent. Serialising twice could reorder keys or change whitespace,
+which would break the signature at the receiver. Sign what you send, byte for
+byte.
+
+```python
+class DeliveryResult(NamedTuple):
+    ok: bool
+    error: str | None = None
+    retry_after: int | None = None
+```
+
+**`NamedTuple` over a dict** gives you attribute access (`result.ok`), immutability,
+and type checking, for one line of definition. Over a dataclass it is lighter and
+hashable. For a small immutable result object it is the right pick.
+
+```python
+def _parse_retry_after(resp: httpx.Response) -> int | None:
+    value = resp.headers.get("Retry-After")
+    if value and value.isdigit():
+        return int(value)
+    return None
+```
+
+**Defensive parsing of a header you do not control.** `Retry-After` is allowed by
+the HTTP spec to be either a number of seconds or an HTTP date. We handle the
+numeric form and return `None` otherwise, which falls back to normal backoff.
+Never trust the shape of input from another system.
+
+## 4B.5 `batcher.py` in full
+
+The file Part 4 barely touched. 150 lines, and the second-most interesting file
+in the project.
+
+### Finding destinations that are due
+
+```sql
+SELECT dst.id            AS dest_id,
+       dst.batch_size    AS batch_size,
+       dst.batch_window_s AS window_s,
+       count(*) FILTER (WHERE d.status = 'pending')          AS n_pending,
+       min(d.created_at) FILTER (WHERE d.status = 'pending') AS oldest,
+       count(*) FILTER (
+           WHERE d.status = 'delivering'
+             AND d.claimed_at < now() - make_interval(secs => :ct)
+       ) AS n_stale
+FROM destinations dst
+JOIN deliveries d ON d.destination_id = dst.id
+WHERE dst.enabled AND dst.batch_size > 1
+  AND (
+        d.status = 'pending'
+     OR (d.status = 'delivering' AND d.claimed_at < now() - make_interval(secs => :ct))
+  )
+GROUP BY dst.id, dst.batch_size, dst.batch_window_s
+```
+
+**`FILTER (WHERE ...)` is a Postgres aggregate filter.** It lets one query
+compute several differently-filtered aggregates in a single pass:
+
+- `n_pending`: how many are waiting, for the size trigger
+- `oldest`: the oldest waiting row's timestamp, for the window trigger
+- `n_stale`: how many are orphaned from a crashed flush
+
+The alternative is three queries, or `count(CASE WHEN ... END)` which is uglier.
+`FILTER` is standard SQL and worth knowing.
+
+**`WHERE dst.batch_size > 1`** is the mirror of the worker's `= 1`. Together they
+partition every delivery into exactly one of the two paths, with no overlap and
+no gap.
+
+**`make_interval(secs => :ct)`** builds an interval from a bound parameter.
+You cannot write `now() - :ct * interval '1 second'` safely with a parameter,
+and string-concatenating the number into the SQL would be an injection risk.
+`make_interval` with a named argument is the correct form.
+
+### Deciding whether to flush
+
+```python
+def _is_due(row) -> bool:
+    if row.n_stale > 0:                      # orphaned, always recover
+        return True
+    if row.n_pending >= row.batch_size:      # size trigger
+        return True
+    if row.oldest is not None:               # window trigger
+        cutoff = datetime.now(UTC) - timedelta(seconds=row.window_s)
+        return row.oldest <= cutoff
+    return False
+```
+
+Order matters. Stale recovery is checked first and unconditionally, because an
+orphaned batch should never wait for a size or time trigger that may never fire.
+
+### Claiming and flushing
+
+```python
+CLAIM_BATCH_SQL = text("""
+    UPDATE deliveries
+    SET status = 'delivering', claimed_at = now()
+    WHERE id IN (
+        SELECT id FROM deliveries
+        WHERE destination_id = :dest
+          AND (
+                status = 'pending'
+             OR (status = 'delivering' AND claimed_at < now() - make_interval(secs => :ct))
+          )
+        ORDER BY created_at
+        FOR UPDATE SKIP LOCKED
+        LIMIT :bs
+    )
+    RETURNING id, event_id
+""")
+```
+
+Same `SKIP LOCKED` discipline as the worker, for the same reason: two batchers
+must never claim the same rows.
+
+**`ORDER BY created_at`** here, not `next_attempt_at`. Batched deliveries are
+about arrival order, and you want the oldest data flushed first.
+
+```python
+async def _flush_one(dest_id: str, batch_size: int) -> int:
+    # 1. claim, in its own transaction
+    async with SessionLocal() as db:
+        claimed = (await db.execute(CLAIM_BATCH_SQL, {...})).all()
+        await db.commit()
+
+    if not claimed:
+        return 0
+
+    # 2. load the event bodies
+    async with SessionLocal() as db:
+        events = {e.id: e for e in await db.execute(
+            select(Event.id, Event.type, Event.payload).where(Event.id.in_(event_ids))
+        )}
+
+    # 3. write the batch and mark delivered, in ONE transaction
+    async with SessionLocal() as db:
+        async with db.begin():
+            await db.execute(
+                pg_insert(WarehouseEvent).values(rows).on_conflict_do_nothing(
+                    index_elements=["delivery_id"]
+                )
+            )
+            await db.execute(
+                update(Delivery).where(Delivery.id.in_(delivery_ids))
+                .values(status="delivered", delivered_at=datetime.now(UTC), attempts=1)
+            )
+    return len(delivery_ids)
+```
+
+**Three phases, and only the third is atomic.** The sink write and the status
+update must commit together, or you get rows written but not marked (they would
+be written again, harmless because of `ON CONFLICT`) or marked but not written
+(actual data loss). The claim in phase one is deliberately separate so no lock is
+held during the work.
+
+**`select(...).where(Event.id.in_(event_ids))`** is one query for all the events
+in the batch. The naive version loops and queries per delivery, which is the
+**N+1 query problem**: 500 deliveries become 501 round trips. Batch your loads.
+
+**`pg_insert` is the Postgres-specific insert**, imported as
+`from sqlalchemy.dialects.postgresql import insert as pg_insert`. The generic
+`insert` has no `.on_conflict_do_nothing()`, because that is not standard SQL.
+Reaching for a dialect-specific construct when you need one is normal.
+
+**`async with db.begin()`** opens an explicit transaction block that commits on
+clean exit and rolls back on exception. Compare with the plain
+`async with SessionLocal() as db` used elsewhere, where you call `commit()`
+yourself.
+
+**`attempts=1` on flush.** Batched deliveries do not retry individually, so the
+attempt count is nominal. Worth knowing if you ever read those numbers.
+
+## 4B.6 Alembic and migrations
+
+Not covered at all in Part 4, and it is a topic you will be asked about.
+
+**What migrations are for.** Your models describe the schema you want. The
+database has the schema it currently has. A migration is a versioned, ordered
+script that moves one to the other. Without them, "works on my machine" becomes
+literal: your laptop's database has the new column, production does not.
+
+**The workflow:**
+
+```bash
+# 1. change a model in app/models.py
+
+# 2. generate a migration by diffing models against the live database
+alembic revision --autogenerate -m "add claimed_at to deliveries"
+
+# 3. READ the generated file. Autogenerate is a good assistant, not an oracle.
+
+# 4. apply it
+alembic upgrade head
+
+# 5. if you need to undo
+alembic downgrade -1
+```
+
+**How autogenerate knows anything.** `alembic/env.py` is wired to the project:
+
+```python
+from app.config import settings
+from app.db import Base
+from app import models        # noqa: F401  <- imports register tables on Base.metadata
+
+target_metadata = Base.metadata
+```
+
+That `import models` line looks pointless and is load bearing. Importing the
+module executes the class definitions, which registers every table onto
+`Base.metadata`. Without it, autogenerate sees an empty schema and cheerfully
+generates a migration that drops all your tables.
+
+**What autogenerate catches and misses:**
+
+| Detects | Misses |
+|---|---|
+| New and dropped tables | Column renames (sees a drop plus an add, which loses data) |
+| New and dropped columns | Most `CHECK` constraints |
+| Index and constraint changes | Anything requiring data migration |
+| Type changes | Server default changes, sometimes |
+
+This is why step 3 is "read the generated file."
+
+**Migrations are ordered by revision, not filename.** Each file has a
+`revision` and a `down_revision`, forming a linked list. `head` is the newest.
+Two people branching from the same revision creates two heads, which Alembic
+will refuse to apply until you merge them.
+
+**Why `alembic upgrade head` runs in CI and in compose.** The schema change ships
+with the code that needs it, applied automatically, in order, everywhere.
+
+## 4B.7 The infrastructure files
+
+### `Dockerfile`
+
+```dockerfile
+FROM python:3.13-slim
+
+WORKDIR /app
+
+COPY pyproject.toml ./
+COPY app ./app
+COPY alembic ./alembic
+COPY alembic.ini ./
+COPY start.sh ./
+
+RUN pip install --no-cache-dir -e . && chmod +x start.sh
+
+EXPOSE 8000
+CMD ["./start.sh"]
+```
+
+**`-slim` over the full image** cuts several hundred MB of build tools you do not
+need at runtime. **`--no-cache-dir`** stops pip caching wheels into the image.
+
+**Why `alembic` and `alembic.ini` are copied in.** The container has to be able
+to run migrations, not just serve requests.
+
+**`EXPOSE` is documentation, not enforcement.** It tells a reader and some
+tooling which port matters; it does not actually publish anything.
+
+### `docker-compose.yml`
+
+```yaml
+services:
+  db:
+    image: postgres:16
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U eventrouter"]
+      interval: 2s
+      retries: 15
+
+  migrate:
+    build: .
+    command: alembic upgrade head
+    environment: &env
+      DATABASE_URL: postgresql+asyncpg://eventrouter:eventrouter@db:5432/eventrouter
+      DATABASE_SSL: "false"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  api:
+    build: .
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    environment: *env
+    ports: ["8000:8000"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  worker:
+    build: .
+    command: python -m app.worker
+    environment: *env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+```
+
+**`condition: service_healthy` is the important part.** Plain `depends_on` only
+waits for the container to *start*, not for Postgres to be *ready to accept
+connections*. Without the healthcheck, migrations race the database and fail
+intermittently, which is maddening to debug.
+
+**`service_completed_successfully`** makes api and worker wait for migrations to
+finish and exit 0. A one-shot job as a dependency.
+
+**`&env` and `*env` are YAML anchors.** Define the block once, reference it
+elsewhere. Changing the database URL means editing one place.
+
+**The host is `db`, not `localhost`.** Compose gives each service a DNS name
+matching its key. Inside the network, `db:5432` reaches Postgres.
+
+**`--host 0.0.0.0`** is required in a container. The default `127.0.0.1` only
+accepts connections from inside the container itself, so the published port
+would appear dead from outside.
+
+### `start.sh`
+
+```sh
+#!/bin/sh
+set -e
+
+python -m app.worker &
+
+exec uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+**Only for the single-instance free-tier deploy.** Compose runs them properly as
+two services.
+
+**`exec` replaces the shell process** with uvicorn, so uvicorn becomes PID 1 and
+receives `SIGTERM` directly on shutdown. Without `exec`, the shell holds PID 1,
+swallows the signal, and the platform kills the container ungracefully after a
+timeout.
+
+**The known weakness, stated honestly:** if the backgrounded worker dies, the API
+stays up and healthy while deliveries silently stop. Acceptable for a demo,
+not for production.
+
+### `.github/workflows/ci.yml`
+
+```yaml
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install -e ".[dev]"
+      - run: ruff check app/ tests/
+      - env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: alembic upgrade head
+      - env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: pytest -q
+```
+
+**Order is deliberate.** Lint first because it takes seconds and catches trivia
+before you spend two minutes on tests. Migrate before test because the tests need
+the schema.
+
+**`secrets.DATABASE_URL`** is set in the repository settings, never in the file.
+Anything committed to a public repo is public forever, including in history after
+you delete it.
+
+**Why CI matters for a portfolio project:** a green check on every commit shows
+the tests actually run, not just that a `tests/` directory exists. Its absence is
+noticed.
 
 ---
 ---
