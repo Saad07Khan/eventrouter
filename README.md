@@ -1,22 +1,57 @@
 # EventRouter
 
 Accept an event once, deliver it to many destinations, each with its own format
-and its own retry state. Similar in shape to Segment or Hookdeck, scoped down to
-the delivery engine.
+and its own retry state. Same shape as Segment or Hookdeck, scoped to the
+delivery engine.
+
+Calling Slack, a CRM, and a warehouse inline makes signup as slow as the slowest
+one, and a CRM outage either fails the signup or gets swallowed by `except:
+pass`. This takes the event off the request path and owns getting it delivered.
+
+## Quick start
 
 ```bash
-docker compose up      # Postgres, migrations, API, and worker
+docker compose up      # Postgres, migrations, API, worker
 ```
 
-## The problem
+Docs at http://localhost:8000/docs.
 
-A signup needs to reach Slack, a CRM, and a data warehouse. Call all three
-inline and signup becomes as slow as the slowest one. Worse, when the CRM
-returns a 500 you either fail the signup or wrap it in `except: pass` and
-silently lose leads for a month before anyone notices.
+```bash
+# 1. register a source, keep the write key it returns
+curl -X POST localhost:8000/v1/sources -d '{"name": "web-app"}'
 
-EventRouter takes the event off the request path and takes responsibility for
-getting it everywhere it needs to go.
+# 2. point it somewhere
+curl -X POST localhost:8000/v1/destinations -d '{
+  "source_id": "src_...", "type": "http", "filter": "user.*",
+  "config": {"url": "https://your-endpoint/hook", "secret": "shh"}
+}'
+
+# 3. send an event
+curl -X POST localhost:8000/v1/track \
+  -H "Authorization: Bearer wk_..." -H "Idempotency-Key: signup:u_123" \
+  -d '{"type": "user.signed_up", "payload": {"user_id": "u_123"}}'
+
+# 4. see what happened to it
+curl localhost:8000/v1/events/evt_...
+```
+
+```
+POST  /v1/sources                     register a source, write key shown once
+POST  /v1/destinations                filter, transform, batching config
+POST  /v1/track                       ingest (Idempotency-Key header)
+GET   /v1/events/{id}                 status and attempts per destination
+POST  /v1/destinations/{id}/replay    dead deliveries back to pending
+GET   /v1/destinations/{id}/stats     counts by status, average attempts
+```
+
+## Stack
+
+FastAPI, Postgres (Neon), SQLAlchemy 2.0 async, Alembic, httpx, JMESPath.
+Tests with pytest and respx, linting with ruff, CI on GitHub Actions.
+
+Compose runs the API and worker as separate services, which is the real
+architecture. Stop the worker, send events, start it again, and watch the queue
+drain.
 
 ## How it works
 
@@ -46,9 +81,8 @@ POST /v1/track
    └──────────► webhook     HMAC signed, backoff on failure
 ```
 
-Two processes sharing one database and nothing else. Each delivery row carries
-its own status, attempt count, and next retry time, so Slack failing has no
-effect on the warehouse.
+Every delivery row carries its own status, attempt count, and next retry time,
+so Slack failing has no effect on the warehouse.
 
 ## Design decisions
 
@@ -91,16 +125,8 @@ transaction.
   both          500 rows OR 30s   ✓
 ```
 
-**A failed batch retries whole.** The sink write is idempotent
-(`ON CONFLICT DO NOTHING` on delivery id), so rows that already landed cost
-nothing to resend. Per-row state inside a batch is machinery for a rare case.
-
-**Transforms are JMESPath, not user code.** Running customer code means
-sandboxing arbitrary execution, a much harder problem than this needs.
-JMESPath reshapes data and does nothing else.
-
-**One slow destination cannot stall the others.** This took two fixes, and the
-first one alone looked like it should have been enough.
+**One slow destination cannot stall the others.** Two fixes, and the first alone
+looked like it should have been enough.
 
 ```
   destination A hangs 30s, B and C healthy, 6 events each
@@ -109,43 +135,13 @@ first one alone looked like it should have been enough.
   + spawn deliveries as tasks  A: 0   B: 6   C: 6    ✓
 ```
 
-The cap stops A occupying every worker slot. But the claim loop was awaiting
-the whole batch, so one hanging request also froze it from picking up new work.
+The cap stops A occupying every worker slot. Separately, the claim loop was
+awaiting the whole batch, so one hanging request froze it from taking new work.
 
-With a single Postgres as the source of truth there is no consensus, leader
-election, or split brain here. The problems are concurrency and partial failure.
-
-## API
-
-```
-POST  /v1/sources                     register a source, returns a write key (shown once)
-POST  /v1/destinations                register a destination (filter, transform, batching)
-POST  /v1/track                       ingest an event (Idempotency-Key header)
-GET   /v1/events/{id}                 event plus every delivery's status and attempts
-POST  /v1/destinations/{id}/replay    reset dead deliveries back to pending
-GET   /v1/destinations/{id}/stats     counts by status, average attempts
-```
-
-Interactive docs at `/docs`.
-
-```bash
-# register a source, keep the write key
-curl -X POST $BASE/v1/sources -d '{"name": "web-app"}'
-
-# point it somewhere
-curl -X POST $BASE/v1/destinations -d '{
-  "source_id": "src_...", "type": "http", "filter": "user.*",
-  "config": {"url": "https://your-endpoint/hook", "secret": "shh"}
-}'
-
-# send an event
-curl -X POST $BASE/v1/track \
-  -H "Authorization: Bearer wk_..." -H "Idempotency-Key: signup:u_123" \
-  -d '{"type": "user.signed_up", "payload": {"user_id": "u_123"}}'
-
-# see what happened to it
-curl $BASE/v1/events/evt_...
-```
+Two smaller ones. A failed batch retries whole rather than tracking per-row
+state, because the sink write is idempotent so resending costs nothing.
+Transforms are JMESPath rather than user-supplied code, which would mean
+sandboxing arbitrary execution.
 
 ## Tests
 
@@ -153,65 +149,10 @@ curl $BASE/v1/events/evt_...
 pytest -q      # 20 tests
 ```
 
-They run against a real Postgres. Only outbound HTTP is mocked (`respx`), since
-the properties worth proving here are database behaviour.
-
-| Test | Proves |
-|---|---|
-| Duplicate idempotency key | one event under a concurrent retry, not two |
-| Duplicate track | rollback covers the fan-out, leaving no orphan deliveries |
-| Concurrent claim | two workers never claim the same delivery |
-| Retry then success | transient failures recover |
-| Dead-letter at max attempts | a gone destination stops consuming retries |
-| Stale claim reclaimed | a crashed worker's row does not stay stuck |
-| Batch flush on size, on window | both triggers fire, and neither fires early |
-| Circuit breaker | a dead destination gets deferred, not hammered |
+Against a real Postgres, with only outbound HTTP mocked, since the properties
+worth proving are database behaviour: idempotent ingest under a concurrent
+retry, fan-out rolling back cleanly, two workers never claiming the same row,
+retry to recovery, dead-lettering, stale claims from a crashed worker, both
+batch flush triggers, and the circuit breaker deferring instead of hammering.
 
 CI runs lint, migrations, and the suite on every push.
-
-## Stack
-
-FastAPI, Postgres (Neon), SQLAlchemy 2.0 async, Alembic, httpx, JMESPath,
-pytest with respx, ruff, GitHub Actions.
-
-## Running locally
-
-`docker compose up` starts Postgres, applies migrations, then runs the API and
-the worker as separate services. Open http://localhost:8000/docs.
-
-To watch the queue actually queue, stop the worker, send a few events, and start
-it again:
-
-```bash
-docker compose stop worker
-docker compose start worker
-```
-
-Without Docker:
-
-```bash
-python3.13 -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
-cp .env.example .env          # set DATABASE_URL, and DATABASE_SSL=false for local PG
-
-alembic upgrade head
-uvicorn app.main:app --reload   # terminal 1
-python -m app.worker            # terminal 2
-```
-
-## Limitations
-
-Circuit breaker state lives in process memory, so running several workers means
-each keeps its own view of which destinations are down rather than sharing one.
-
-Batching and immediate delivery share a worker loop, so a large batch flush
-briefly delays the next poll for immediate deliveries.
-
-Tests truncate and reuse the development database instead of running against a
-dedicated branch. Fine solo, not how a team would do it.
-
-`start.sh` runs the API and worker in one container to fit on a single free
-hosting instance. If the worker dies there the health check stays green while
-deliveries quietly stop. Splitting them into two monitored services is a deploy
-config change, not a code change, and `docker-compose.yml` already runs them
-that way.
