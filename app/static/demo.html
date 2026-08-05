@@ -296,13 +296,13 @@
   @media (max-width: 700px) { .frame { padding: 24px; } }
   .scroll { overflow-x: auto; max-width: 100%; }
   /* The wide diagram scales down to unreadable on a phone, so swap in the
-     stacked one instead of shrinking a 2560px drawing into 320px. Both carry
-     their own cream card, so they need no .frame wrapper around them. */
+     portrait one. Both carry their own cream card, so they need no .frame
+     wrapper around them. */
   .diagram-wide, .diagram-tall { display: block; width: 100%; height: auto; }
   .diagram-tall { display: none; }
   @media (max-width: 760px) {
     .diagram-wide { display: none; }
-    .diagram-tall { display: block; margin: 0 auto; max-width: 390px; }
+    .diagram-tall { display: block; margin: 0 auto; max-width: 460px; }
   }
   svg { display: block; max-width: 100%; height: auto; }
   figcaption { color: var(--slate); font-size: 15px; margin-top: 24px; max-width: 62ch; }
@@ -502,17 +502,14 @@
       delivery has a life of its own.
     </p>
     <figure>
-      <!-- Animated, self-contained. Loaded as <img> so the SVG's own CSS runs
-           but it stays inert: no script, no external fetches from inside it. -->
-      <img class="diagram-wide" src="/static/webhook-flow-desktop.svg"
-           width="2560" height="1160" alt="One event fans out into four independent deliveries in different states" decoding="async">
-      <img class="diagram-tall" src="/static/webhook-flow-mobile.svg"
-           width="390" height="900" alt="" aria-hidden="true" decoding="async">
+      <img class="diagram-wide" src="/static/flow-desktop.webp"
+           width="1672" height="929" alt="One event fans out into four independent deliveries in different states" decoding="async">
+      <img class="diagram-tall" src="/static/flow-mobile.webp"
+           width="1086" height="1432" alt="" aria-hidden="true" decoding="async">
 
       <figcaption>
-        Four deliveries from Ada's one signup, in different states at the same time. HubSpot ran
-        out of retries and is marked dead, which is not the same as lost. It sits on disk until
-        you fix HubSpot and hit replay. The other three neither waited for it nor noticed.
+        Dead is not the same as lost. HubSpot ran out of retries and stopped, but the delivery
+        sits on disk until you fix HubSpot and hit replay.
       </figcaption>
     </figure>
   </div>
