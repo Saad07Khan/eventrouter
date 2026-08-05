@@ -2,11 +2,13 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
 from app.routes import router
 
-_DEMO_PAGE = Path(__file__).parent / "static" / "demo.html"
+_STATIC_DIR = Path(__file__).parent / "static"
+_DEMO_PAGE = _STATIC_DIR / "demo.html"
 
 app = FastAPI(
     title="EventRouter",
@@ -53,3 +55,7 @@ async def demo():
 
 
 app.include_router(router)
+
+# Serves anything dropped in app/static, so the demo page can reference an image
+# at /static/<name> without another route.
+app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
