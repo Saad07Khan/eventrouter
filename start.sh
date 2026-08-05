@@ -6,6 +6,17 @@
 # change: `python -m app.worker` and `uvicorn app.main:app` run unmodified.
 set -e
 
+# Bring the schema up to date before anything serves traffic. Idempotent, so
+# it is a no-op on every deploy after the first, and `set -e` means a failed
+# migration aborts the boot rather than serving against a stale schema.
+#
+# This lives here rather than in a platform start command because chaining it
+# with && there depends on the platform handing the string to a shell, which
+# Render does not do reliably: the whole command ends up as one argv entry and
+# exits 127. In the script it is just a line, and the container is correct
+# wherever it runs.
+alembic upgrade head
+
 python -m app.worker &
 worker_pid=$!
 

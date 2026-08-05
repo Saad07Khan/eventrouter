@@ -11,10 +11,10 @@ services:
     # ap-southeast-2. Oregon works too, it just adds ~50ms per round trip, and
     # the worker makes a lot of them.
     region: singapore
-    # Migrations run before the app boots, so a deploy that adds a column
-    # cannot start serving against the old schema. Idempotent, so it is safe
-    # on every deploy. start.sh then runs the worker and uvicorn together.
-    dockerCommand: sh -c "alembic upgrade head && ./start.sh"
+    # No dockerCommand on purpose. The Dockerfile already runs ./start.sh, and
+    # that script runs the migration itself. Overriding it here to chain the two
+    # with && fails: Render passes the string through without a shell, so the
+    # whole thing becomes one argv entry and the container exits 127.
     healthCheckPath: /health
     envVars:
       # Supabase session pooler, not the direct db.<ref>.supabase.co host:
