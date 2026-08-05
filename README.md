@@ -8,6 +8,27 @@ Calling Slack, a CRM, and a warehouse inline makes signup as slow as the slowest
 one, and a CRM outage either fails the signup or gets swallowed by `except:
 pass`. This takes the event off the request path and owns getting it delivered.
 
+**[Try it live →](https://eventrouter.onrender.com/demo)**
+
+[![EventRouter](docs/hero.webp)](https://eventrouter.onrender.com/demo)
+
+## See it fail, live
+
+The page has a button that runs the real thing against a real database. It
+creates a source, wires up three destinations — one that works, one pointed at a
+host that cannot resolve, one batched sink — and sends a single event to all
+three. Then it polls until each one settles.
+
+[![The live demo, settled](docs/demo.webp)](https://eventrouter.onrender.com/demo)
+
+One event, three delivery rows, three different outcomes. The broken destination
+climbed to five attempts and dead-lettered on its own schedule; the other two
+delivered on the first try and never waited for it. Dead is not lost — the row
+sits on disk until you fix the destination and hit replay.
+
+It is a free instance, so the first request after a quiet spell takes about a
+minute to wake up.
+
 ## Quick start
 
 ```bash
@@ -44,24 +65,20 @@ POST  /v1/destinations/{id}/replay    dead deliveries back to pending
 GET   /v1/destinations/{id}/stats     counts by status, average attempts
 ```
 
-## Watching it fail
+## Running the demo yourself
 
-A single request tells you nothing interesting — `/v1/track` returns 202 and
-that is that. What this service is actually for only shows up when a delivery
-fails, so both demos below stage a failure on purpose: one event, fanned out to
-a destination that works, a destination that cannot possibly work, and a batched
-warehouse sink. Then they watch the three delivery rows for that one event
-diverge.
+The same staged failure runs from the terminal, against local Compose or any
+deploy:
 
 ```bash
 ./demo.sh                             # against docker compose
-./demo.sh https://your-app.onrender.com
+./demo.sh https://eventrouter.onrender.com
 ```
 
-`/demo` in a browser does the same thing with a live-updating table, and offers
-a replay button once something has dead-lettered. Set `DEMO_ENABLED=false` to
-serve a 404 instead — the page writes real rows, so a public deploy otherwise
-hands anyone a button that fills the database.
+`/demo` in a browser does the same thing with a live-updating table and a replay
+button once something has dead-lettered. Set `DEMO_ENABLED=false` to serve a 404
+instead — the page writes real rows, so a public deploy otherwise hands anyone a
+button that fills the database.
 
 Delivery latency is the one thing to tune for a demo. The defaults are
 production values: `retry_base_seconds=10` over `retry_max_attempts=8` takes
