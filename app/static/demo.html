@@ -296,11 +296,13 @@
   @media (max-width: 700px) { .frame { padding: 24px; } }
   .scroll { overflow-x: auto; max-width: 100%; }
   /* The wide diagram scales down to unreadable on a phone, so swap in the
-     stacked one instead of shrinking a 720px drawing into 320px. */
+     stacked one instead of shrinking a 2560px drawing into 320px. Both carry
+     their own cream card, so they need no .frame wrapper around them. */
+  .diagram-wide, .diagram-tall { display: block; width: 100%; height: auto; }
   .diagram-tall { display: none; }
   @media (max-width: 760px) {
     .diagram-wide { display: none; }
-    .diagram-tall { display: block; margin: 0 auto; max-width: 320px; }
+    .diagram-tall { display: block; margin: 0 auto; max-width: 390px; }
   }
   svg { display: block; max-width: 100%; height: auto; }
   figcaption { color: var(--slate); font-size: 15px; margin-top: 24px; max-width: 62ch; }
@@ -500,113 +502,13 @@
       delivery has a life of its own.
     </p>
     <figure>
-      <div class="frame">
-        <div class="scroll">
-          <svg class="diagram-wide" viewBox="0 0 720 310" role="img" aria-label="One event fans out into four independent deliveries in different states">
-            <defs>
-              <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
-                <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
-              </marker>
-            </defs>
-            <g fill="none" stroke="currentColor" stroke-width="1.5" opacity=".35">
-              <path d="M124,60 L162,60" marker-end="url(#ar)"/>
-              <path d="M300,88 L300,100" marker-end="url(#ar)"/>
-              <path d="M300,162 L300,176" marker-end="url(#ar)"/>
-              <path d="M368,204 L412,204"/>
-              <path d="M412,204 C468,204 468,54 522,54" marker-end="url(#ar)"/>
-              <path d="M412,204 C468,204 468,122 522,122" marker-end="url(#ar)"/>
-              <path d="M412,204 C468,204 468,190 522,190" marker-end="url(#ar)"/>
-              <path d="M412,204 C468,204 468,258 522,258" marker-end="url(#ar)"/>
-            </g>
-            <g font-family="'Avenir Next', Avenir, system-ui, sans-serif" font-size="13" font-weight="450">
-              <rect x="8" y="34" width="116" height="52" rx="26" fill="var(--surface)" stroke="var(--line)"/>
-              <text x="66" y="57" text-anchor="middle" fill="currentColor" font-size="12">Your app</text>
-              <text x="66" y="74" text-anchor="middle" fill="var(--slate)" font-size="11">Ada signs up</text>
+      <!-- Animated, self-contained. Loaded as <img> so the SVG's own CSS runs
+           but it stays inert: no script, no external fetches from inside it. -->
+      <img class="diagram-wide" src="/static/webhook-flow-desktop.svg"
+           width="2560" height="1160" alt="One event fans out into four independent deliveries in different states" decoding="async">
+      <img class="diagram-tall" src="/static/webhook-flow-mobile.svg"
+           width="390" height="900" alt="" aria-hidden="true" decoding="async">
 
-              <rect x="162" y="32" width="276" height="56" rx="28" fill="var(--surface)" stroke="var(--line)"/>
-              <text x="300" y="55" text-anchor="middle" fill="currentColor" font-family="ui-monospace, monospace" font-size="12">POST /v1/track</text>
-              <text x="300" y="73" text-anchor="middle" fill="var(--slate)" font-size="11">answers 202 in 40ms, Ada moves on</text>
-
-              <rect x="192" y="100" width="216" height="62" rx="31" fill="var(--surface)" stroke="var(--line)"/>
-              <text x="300" y="124" text-anchor="middle" fill="currentColor" font-size="12">events + deliveries</text>
-              <text x="300" y="142" text-anchor="middle" fill="var(--slate)" font-size="11">one transaction, never half done</text>
-
-              <rect x="232" y="182" width="136" height="44" rx="22" fill="var(--surface)" stroke="var(--line)"/>
-              <text x="300" y="209" text-anchor="middle" fill="currentColor" font-size="12">worker</text>
-              <text x="216" y="199" text-anchor="end" fill="var(--slate)" font-size="11">claims rows with</text>
-              <text x="216" y="215" text-anchor="end" fill="var(--slate)" font-size="11">SKIP LOCKED</text>
-
-              <rect x="522" y="32" width="190" height="44" rx="22" fill="var(--surface)" stroke="var(--ok)"/>
-              <text x="542" y="59" fill="var(--ok)" font-size="12" font-family="ui-monospace, monospace">delivered</text>
-              <text x="700" y="59" text-anchor="end" fill="var(--slate)" font-size="11">Mailchimp, 1 try</text>
-
-              <rect x="522" y="100" width="190" height="44" rx="22" fill="var(--surface)" stroke="var(--ok)"/>
-              <text x="542" y="127" fill="var(--ok)" font-size="12" font-family="ui-monospace, monospace">delivered</text>
-              <text x="700" y="127" text-anchor="end" fill="var(--slate)" font-size="11">Slack, 1 try</text>
-
-              <rect x="522" y="168" width="190" height="44" rx="22" fill="var(--surface)" stroke="var(--ok)"/>
-              <text x="542" y="195" fill="var(--ok)" font-size="12" font-family="ui-monospace, monospace">delivered</text>
-              <text x="700" y="195" text-anchor="end" fill="var(--slate)" font-size="11">Warehouse</text>
-
-              <rect x="522" y="236" width="190" height="44" rx="22" fill="var(--surface)" stroke="var(--bad)"/>
-              <text x="542" y="263" fill="var(--bad)" font-size="12" font-family="ui-monospace, monospace">dead</text>
-              <text x="700" y="263" text-anchor="end" fill="var(--slate)" font-size="11">HubSpot, gave up</text>
-            </g>
-          </svg>
-
-          <!-- Same diagram, stacked. The wide one shrinks to unreadable on a phone,
-               so below 760px this vertical version is shown instead. -->
-          <!-- viewBox is 552 not 540: the last pill ends at y=540, and a 1.5px
-               stroke centred on that edge would be sliced in half by the canvas
-               boundary. The extra rows give the stroke somewhere to live. -->
-          <svg class="diagram-tall" viewBox="0 0 320 552" role="img" aria-label="One event fans out into four independent deliveries in different states">
-            <defs>
-              <marker id="arv" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
-                <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
-              </marker>
-            </defs>
-            <g fill="none" stroke="currentColor" stroke-width="1.5" opacity=".35">
-              <path d="M160,64 L160,80" marker-end="url(#arv)"/>
-              <path d="M160,140 L160,156" marker-end="url(#arv)"/>
-              <path d="M160,216 L160,232" marker-end="url(#arv)"/>
-              <path d="M160,286 L160,318" marker-end="url(#arv)"/>
-            </g>
-            <g font-family="'Avenir Next', Avenir, system-ui, sans-serif" font-size="13" font-weight="450">
-              <rect x="70" y="8" width="180" height="56" rx="28" fill="var(--surface)" stroke="var(--line)"/>
-              <text x="160" y="32" text-anchor="middle" fill="currentColor" font-size="13">Your app</text>
-              <text x="160" y="50" text-anchor="middle" fill="var(--slate)" font-size="12">Ada signs up</text>
-
-              <rect x="30" y="80" width="260" height="60" rx="30" fill="var(--surface)" stroke="var(--line)"/>
-              <text x="160" y="105" text-anchor="middle" fill="currentColor" font-family="ui-monospace, monospace" font-size="13">POST /v1/track</text>
-              <text x="160" y="124" text-anchor="middle" fill="var(--slate)" font-size="12">202 in 40ms, Ada moves on</text>
-
-              <rect x="30" y="156" width="260" height="60" rx="30" fill="var(--surface)" stroke="var(--line)"/>
-              <text x="160" y="181" text-anchor="middle" fill="currentColor" font-size="13">events + deliveries</text>
-              <text x="160" y="200" text-anchor="middle" fill="var(--slate)" font-size="12">one transaction, never half done</text>
-
-              <rect x="30" y="232" width="260" height="54" rx="27" fill="var(--surface)" stroke="var(--line)"/>
-              <text x="160" y="254" text-anchor="middle" fill="currentColor" font-size="13">worker</text>
-              <text x="160" y="272" text-anchor="middle" fill="var(--slate)" font-size="12">claims rows with SKIP LOCKED</text>
-
-              <rect x="20" y="326" width="280" height="46" rx="23" fill="var(--surface)" stroke="var(--ok)"/>
-              <text x="40" y="354" fill="var(--ok)" font-size="13" font-family="ui-monospace, monospace">delivered</text>
-              <text x="280" y="354" text-anchor="end" fill="var(--slate)" font-size="12">Mailchimp</text>
-
-              <rect x="20" y="382" width="280" height="46" rx="23" fill="var(--surface)" stroke="var(--ok)"/>
-              <text x="40" y="410" fill="var(--ok)" font-size="13" font-family="ui-monospace, monospace">delivered</text>
-              <text x="280" y="410" text-anchor="end" fill="var(--slate)" font-size="12">Slack</text>
-
-              <rect x="20" y="438" width="280" height="46" rx="23" fill="var(--surface)" stroke="var(--ok)"/>
-              <text x="40" y="466" fill="var(--ok)" font-size="13" font-family="ui-monospace, monospace">delivered</text>
-              <text x="280" y="466" text-anchor="end" fill="var(--slate)" font-size="12">Warehouse</text>
-
-              <rect x="20" y="494" width="280" height="46" rx="23" fill="var(--surface)" stroke="var(--bad)"/>
-              <text x="40" y="522" fill="var(--bad)" font-size="13" font-family="ui-monospace, monospace">dead</text>
-              <text x="280" y="522" text-anchor="end" fill="var(--slate)" font-size="12">HubSpot, gave up</text>
-            </g>
-          </svg>
-        </div>
-      </div>
       <figcaption>
         Four deliveries from Ada's one signup, in different states at the same time. HubSpot ran
         out of retries and is marked dead, which is not the same as lost. It sits on disk until
