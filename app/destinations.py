@@ -52,12 +52,20 @@ async def _send(url: str, body: bytes, headers: dict) -> DeliveryResult:
 
 
 async def deliver_http(payload: dict, config: dict) -> DeliveryResult:
-    """Generic webhook: POST JSON, optionally HMAC-signed with a per-destination secret."""
+    """Generic webhook: POST JSON, optionally HMAC-signed with a per-destination secret.
+
+    config["headers"] carries anything the receiver needs — an Authorization
+    bearer token is what most third-party APIs want — so token-authenticated
+    services work through this deliverer without a type of their own.
+    """
     url = config.get("url")
     if not url:
         return DeliveryResult(ok=False, error="destination config missing 'url'")
     body = json.dumps(payload).encode()
     headers = {"Content-Type": "application/json"}
+    headers.update(config.get("headers", {}))
+    # Signing last so a stray config header cannot overwrite the proof of origin
+    # the receiver checks.
     secret = config.get("secret")
     if secret:
         headers["X-Signature"] = _sign(secret, body)
