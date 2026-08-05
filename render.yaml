@@ -1,0 +1,40 @@
+# Render Blueprint. In Render: New -> Blueprint -> pick this repo.
+# Everything below is applied automatically; the only thing you are asked for
+# is DATABASE_URL, which is marked sync:false so the secret never lives here.
+services:
+  - type: web
+    name: eventrouter
+    runtime: docker
+    plan: free
+    branch: main
+    # Singapore is the closest free region to the Supabase project in
+    # ap-southeast-2. Oregon works too, it just adds ~50ms per round trip, and
+    # the worker makes a lot of them.
+    region: singapore
+    # Migrations run before the app boots, so a deploy that adds a column
+    # cannot start serving against the old schema. Idempotent, so it is safe
+    # on every deploy. start.sh then runs the worker and uvicorn together.
+    dockerCommand: sh -c "alembic upgrade head && ./start.sh"
+    healthCheckPath: /health
+    envVars:
+      # Supabase session pooler, not the direct db.<ref>.supabase.co host:
+      # that one is IPv6-only and Render cannot reach it. Scheme must be
+      # postgresql+asyncpg, user is postgres.<project-ref>, and any special
+      # characters in the password need percent-encoding.
+      - key: DATABASE_URL
+        sync: false
+      - key: DATABASE_SSL
+        value: "true"
+      # start.sh binds 8000 rather than reading $PORT, so pin it to match.
+      - key: PORT
+        value: "8000"
+      # Production defaults take ~20 minutes to dead-letter, which is too slow
+      # to watch. These make the full retry ladder play out in about 30s.
+      - key: RETRY_BASE_SECONDS
+        value: "2"
+      - key: RETRY_MAX_ATTEMPTS
+        value: "5"
+      # Set to false to serve a 404 at /demo. The page writes real rows, so a
+      # public link is a public write button against a 500MB database.
+      - key: DEMO_ENABLED
+        value: "true"
