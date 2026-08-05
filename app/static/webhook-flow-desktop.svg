@@ -93,8 +93,24 @@
   }
 </style>
 
+<defs>
+  <!-- Paper grain and a drawn horizon, taking after the stippled coastline in
+       the hero. Both are static: they render once and never animate. -->
+  <filter id="grain" x="-2%" y="-2%" width="104%" height="104%" color-interpolation-filters="sRGB">
+    <feTurbulence type="fractalNoise" baseFrequency=".3" numOctaves="4" seed="7" stitchTiles="stitch"/>
+    <feColorMatrix values="0 0 0 0 .078  0 0 0 0 .078  0 0 0 0 .075  0 0 0 .42 0"/>
+  </filter>
+  <clipPath id="cardClip"><rect x="60" y="60" width="2440" height="1040" rx="24"/></clipPath>
+</defs>
+
 <rect width="2560" height="1160" fill="var(--bg)"/>
 <rect x="60" y="60" width="2440" height="1040" rx="24" fill="var(--card)"/>
+<!-- Whisper of grain only. The drawing in the hero can carry heavy stipple
+     because it is the subject; here the subject is the diagram, and anything
+     stronger than this greys the card and swallows the hairline pill strokes. -->
+<g clip-path="url(#cardClip)" opacity=".14">
+  <rect x="60" y="60" width="2440" height="1040" fill="none" filter="url(#grain)"/>
+</g>
 
 <g class="a" style="animation-name:loopOut">
 
@@ -157,7 +173,7 @@
       <rect class="pill" x="420" y="820" width="560" height="110" rx="55"/>
       <text class="title" x="700" y="888" text-anchor="middle">worker</text>
     </g>
-    <text class="sub subfade a" x="390" y="950" text-anchor="end"
+    <text class="sub subfade a" x="700" y="972" text-anchor="middle"
           style="animation-name:fade; animation-delay:3.9s">claims rows with SKIP LOCKED</text>
   </g>
 

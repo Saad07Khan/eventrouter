@@ -93,8 +93,26 @@
   }
 </style>
 
+<defs>
+  <!-- Paper grain and a drawn horizon, taking after the stippled coastline in
+       the hero. Both are static: they render once and never animate.
+       Higher baseFrequency than the desktop file because this viewBox is ~6.5x
+       smaller, so the same value would produce grain far too coarse. -->
+  <filter id="grain" x="-2%" y="-2%" width="104%" height="104%" color-interpolation-filters="sRGB">
+    <feTurbulence type="fractalNoise" baseFrequency="1.1" numOctaves="4" seed="7" stitchTiles="stitch"/>
+    <feColorMatrix values="0 0 0 0 .078  0 0 0 0 .078  0 0 0 0 .075  0 0 0 .42 0"/>
+  </filter>
+  <clipPath id="cardClip"><rect x="12" y="12" width="366" height="876" rx="24"/></clipPath>
+</defs>
+
 <rect width="390" height="900" fill="var(--bg)"/>
 <rect x="12" y="12" width="366" height="876" rx="24" fill="var(--card)"/>
+<!-- Whisper of grain only. The drawing in the hero can carry heavy stipple
+     because it is the subject; here the subject is the diagram, and anything
+     stronger than this greys the card and swallows the hairline pill strokes. -->
+<g clip-path="url(#cardClip)" opacity=".14">
+  <rect x="12" y="12" width="366" height="876" fill="none" filter="url(#grain)"/>
+</g>
 
 <g class="a" style="animation-name:loopOut">
 
