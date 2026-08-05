@@ -26,6 +26,11 @@ class Settings(BaseSettings):
     claim_batch: int = 50                 # max deliveries claimed per loop
     claim_timeout_seconds: float = 60.0   # a 'delivering' row older than this is reclaimed
 
+    # The /demo page writes real sources, destinations and events, so a public
+    # deploy hands anyone a button that fills the database. Set DEMO_ENABLED=false
+    # to serve a 404 instead.
+    demo_enabled: bool = True
+
     # --- Backpressure (Step 7) ---
     worker_concurrency: int = 16          # max deliveries in flight at once (global)
     destination_concurrency: int = 5      # max in flight to any ONE destination

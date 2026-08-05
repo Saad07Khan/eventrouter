@@ -44,6 +44,32 @@ POST  /v1/destinations/{id}/replay    dead deliveries back to pending
 GET   /v1/destinations/{id}/stats     counts by status, average attempts
 ```
 
+## Watching it fail
+
+A single request tells you nothing interesting — `/v1/track` returns 202 and
+that is that. What this service is actually for only shows up when a delivery
+fails, so both demos below stage a failure on purpose: one event, fanned out to
+a destination that works, a destination that cannot possibly work, and a batched
+warehouse sink. Then they watch the three delivery rows for that one event
+diverge.
+
+```bash
+./demo.sh                             # against docker compose
+./demo.sh https://your-app.onrender.com
+```
+
+`/demo` in a browser does the same thing with a live-updating table, and offers
+a replay button once something has dead-lettered. Set `DEMO_ENABLED=false` to
+serve a 404 instead — the page writes real rows, so a public deploy otherwise
+hands anyone a button that fills the database.
+
+Delivery latency is the one thing to tune for a demo. The defaults are
+production values: `retry_base_seconds=10` over `retry_max_attempts=8` takes
+about twenty minutes to dead-letter, which nobody will sit and watch. Set
+`RETRY_BASE_SECONDS=2` and `RETRY_MAX_ATTEMPTS=5` and the whole lifecycle —
+first failure, widening backoff, dead-letter — plays out in about thirty
+seconds.
+
 ## Stack
 
 FastAPI, Postgres (Neon), SQLAlchemy 2.0 async, Alembic, httpx, JMESPath.

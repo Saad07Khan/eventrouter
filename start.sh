@@ -11,15 +11,18 @@ worker_pid=$!
 
 # Watchdog: co-locating the two means a dead worker is invisible — uvicorn keeps
 # serving and /health keeps returning ok while deliveries silently stop forever.
-# Signalling PID 1 (uvicorn, after the exec below) takes the container down so
-# the platform restarts it, which also makes /health honest by construction:
-# no worker means no container means no response at all.
+# Taking the whole container down instead lets the platform restart it, and makes
+# /health honest by construction: no worker means no container means no response.
+#
+# $$ is this shell, which `exec` below turns into uvicorn itself — so this is the
+# uvicorn PID (1 in a container) without hardcoding 1 and signalling the host's
+# init if anyone ever runs this script outside a container.
 {
 	while kill -0 "$worker_pid" 2>/dev/null; do
 		sleep 5
 	done
-	echo "start.sh: worker exited, shutting down container" >&2
-	kill -TERM 1
+	echo "start.sh: worker exited, shutting down" >&2
+	kill -TERM "$$"
 } &
 
 # exec replaces the shell with uvicorn so it receives SIGTERM directly from

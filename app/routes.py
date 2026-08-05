@@ -49,6 +49,26 @@ async def create_destination(body: DestinationCreate, db: AsyncSession = Depends
         validate_transform(body.transform)
     except (JMESPathError, ValueError, TypeError) as exc:
         raise HTTPException(status_code=422, detail=f"invalid transform: {exc}") from exc
+    # batch_size is what actually ROUTES a delivery: the worker claims only
+    # batch_size = 1 rows and hands them to a deliverer, the batcher claims
+    # batch_size > 1 rows and writes them to the warehouse sink. If type and
+    # batch_size disagree the delivery goes somewhere nobody asked for — an http
+    # destination with batch_size > 1 gets marked delivered without its URL ever
+    # being called, which is exactly the silent success this service exists to
+    # prevent. Same reasoning as the transform check: fail while a human watches.
+    if body.type == "warehouse" and body.batch_size <= 1:
+        raise HTTPException(
+            status_code=422,
+            detail="a warehouse destination is batched by definition: set batch_size > 1",
+        )
+    if body.type != "warehouse" and body.batch_size > 1:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"batching is only implemented for the warehouse sink, so a "
+                f"'{body.type}' destination must have batch_size 1"
+            ),
+        )
     dest = Destination(
         source_id=body.source_id,
         type=body.type,
@@ -187,7 +207,11 @@ async def destination_stats(destination_id: str, db: AsyncSession = Depends(get_
     total_rows = 0
     for st, n, avg_attempts in rows:
         counts[st] = n
-        total_attempts += (avg_attempts or 0) * n
+        # avg() over an integer column is numeric in Postgres, which asyncpg
+        # hands back as Decimal. Adding that to a float raises TypeError, so
+        # this endpoint 500s on any destination that has deliveries unless we
+        # convert first.
+        total_attempts += float(avg_attempts or 0) * n
         total_rows += n
     return DestinationStats(
         destination_id=destination_id,

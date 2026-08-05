@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EventRouter — live demo</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #fbfbfa; --fg: #1a1a18; --dim: #6b6b66; --line: #e3e3df;
+    --card: #ffffff; --accent: #2f6f4e;
+    --ok: #1f7a4d; --bad: #b23b3b; --wait: #9a6b12; --busy: #2b5f9e;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16161a; --fg: #e8e8e4; --dim: #91918a; --line: #2c2c33;
+      --card: #1d1d22; --accent: #6fbf94;
+      --ok: #5fbf8c; --bad: #e07a7a; --wait: #d6a848; --busy: #7aa8dd;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 2.5rem 1.25rem 4rem; background: var(--bg); color: var(--fg);
+    font: 15px/1.6 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  main { max-width: 60rem; margin: 0 auto; }
+  h1 { font-size: 1.6rem; margin: 0 0 .35rem; letter-spacing: -.02em; }
+  .sub { color: var(--dim); margin: 0 0 2rem; max-width: 46rem; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 1.25rem 1.4rem; margin-bottom: 1.25rem; }
+  h2 { font-size: .78rem; text-transform: uppercase; letter-spacing: .09em; color: var(--dim); margin: 0 0 .9rem; font-weight: 600; }
+  button {
+    font: inherit; font-weight: 550; padding: .6rem 1.15rem; border-radius: 7px;
+    border: 1px solid transparent; background: var(--accent); color: var(--bg);
+    cursor: pointer; transition: opacity .15s;
+  }
+  button:hover:not(:disabled) { opacity: .85; }
+  button:disabled { opacity: .4; cursor: default; }
+  button.ghost { background: transparent; color: var(--fg); border-color: var(--line); }
+  .row { display: flex; gap: .6rem; align-items: center; flex-wrap: wrap; }
+  code, .mono { font-family: var(--mono); font-size: .855em; }
+  .log { list-style: none; margin: 0; padding: 0; }
+  .log li { padding: .3rem 0 .3rem 1.4rem; position: relative; color: var(--dim); }
+  .log li::before { content: "○"; position: absolute; left: 0; color: var(--line); }
+  .log li.done { color: var(--fg); }
+  .log li.done::before { content: "●"; color: var(--ok); }
+  .log li.fail::before { content: "●"; color: var(--bad); }
+  .log li .note { color: var(--dim); font-size: .875em; display: block; }
+  .scroll { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: .9rem; min-width: 34rem; }
+  th { text-align: left; font-size: .7rem; text-transform: uppercase; letter-spacing: .07em; color: var(--dim); padding: 0 .7rem .5rem 0; font-weight: 600; }
+  td { padding: .62rem .7rem .62rem 0; border-top: 1px solid var(--line); vertical-align: top; }
+  .pill { display: inline-block; padding: .12rem .55rem; border-radius: 20px; font-size: .78rem; font-weight: 600; font-family: var(--mono); }
+  .s-delivered { color: var(--ok); background: color-mix(in srgb, var(--ok) 13%, transparent); }
+  .s-dead      { color: var(--bad); background: color-mix(in srgb, var(--bad) 13%, transparent); }
+  .s-pending   { color: var(--wait); background: color-mix(in srgb, var(--wait) 15%, transparent); }
+  .s-delivering{ color: var(--busy); background: color-mix(in srgb, var(--busy) 15%, transparent); }
+  .name { font-weight: 600; }
+  .desc { color: var(--dim); font-size: .84em; }
+  .err { color: var(--dim); font-family: var(--mono); font-size: .8em; word-break: break-word; }
+  .hint { color: var(--dim); font-size: .875rem; margin: .9rem 0 0; }
+  .hidden { display: none; }
+  a { color: var(--accent); }
+  footer { color: var(--dim); font-size: .875rem; margin-top: 2rem; }
+  .banner { border-left: 3px solid var(--wait); padding-left: .85rem; color: var(--dim); font-size: .9rem; margin-top: 1rem; }
+</style>
+</head>
+<body>
+<main>
+  <h1>EventRouter</h1>
+  <p class="sub">
+    One event, fanned out to three destinations. The interesting part is not the happy path —
+    it is that one destination fails, retries on its own schedule and dead-letters
+    <em>without the other two noticing</em>. Retry state lives per destination, not per event.
+  </p>
+
+  <div class="card">
+    <div class="row">
+      <button id="run">Run the demo</button>
+      <button id="replay" class="ghost hidden">Replay dead deliveries</button>
+      <span id="status" class="desc"></span>
+    </div>
+    <p class="hint">
+      Creates a source, wires up three destinations, sends one event, then polls
+      <code>GET /v1/events/{id}</code> every two seconds.
+    </p>
+  </div>
+
+  <div class="card" id="steps-card">
+    <h2>What it is doing</h2>
+    <ul class="log" id="steps"></ul>
+  </div>
+
+  <div class="card hidden" id="table-card">
+    <h2>Deliveries for this one event</h2>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>Destination</th><th>Type</th><th>Status</th><th>Tries</th><th>Last error</th></tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+    <div id="settled" class="banner hidden"></div>
+  </div>
+
+  <footer>
+    <a href="/docs">Swagger</a> · <a href="https://github.com/Saad07Khan/eventrouter">Source</a>
+  </footer>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const steps = $("steps"), rows = $("rows");
+const OK_URL = "https://postman-echo.com/post";
+// .invalid is reserved by RFC 2606 and can never resolve, so this fails every
+// time without depending on a third-party service staying up.
+const FAIL_URL = "https://broken.invalid/webhook";
+
+let names = {}, eventId = null, brokenId = null, timer = null;
+
+function step(text, note) {
+  const li = document.createElement("li");
+  li.textContent = text;
+  if (note) { const s = document.createElement("span"); s.className = "note"; s.textContent = note; li.appendChild(s); }
+  steps.appendChild(li);
+  return li;
+}
+const ok = (li, text) => { li.classList.add("done"); if (text) li.firstChild.textContent = text; };
+
+async function api(path, opts = {}) {
+  const res = await fetch(path, opts);
+  if (!res.ok) throw new Error(`${opts.method || "GET"} ${path} → ${res.status} ${await res.text()}`);
+  return res.json();
+}
+const post = (path, body, headers = {}) => api(path, {
+  method: "POST",
+  headers: { "Content-Type": "application/json", ...headers },
+  body: JSON.stringify(body),
+});
+
+async function run() {
+  $("run").disabled = true;
+  $("replay").classList.add("hidden");
+  $("settled").classList.add("hidden");
+  steps.innerHTML = ""; rows.innerHTML = "";
+  $("status").textContent = "";
+  clearInterval(timer);
+
+  try {
+    let li = step("Registering a source…");
+    const src = await post("/v1/sources", { name: "browser-demo" });
+    ok(li, `Source ${src.id}`);
+    li.querySelector(".note")?.remove();
+    step(`Write key ${src.write_key}`, "Returned once and never again — only its sha256 is stored.").classList.add("done");
+
+    li = step("Creating three destinations…");
+    const healthy = await post("/v1/destinations", {
+      source_id: src.id, type: "http", filter: "user.*",
+      config: { url: OK_URL },
+      transform: { email: "user.email", plan: "plan" },
+    });
+    const broken = await post("/v1/destinations", {
+      source_id: src.id, type: "http", config: { url: FAIL_URL },
+    });
+    const sink = await post("/v1/destinations", {
+      source_id: src.id, type: "warehouse", config: {}, batch_size: 2, batch_window_s: 5,
+    });
+    brokenId = broken.id;
+    names = {
+      [healthy.id]: ["healthy", "filter user.* · transform picks email + plan"],
+      [broken.id]: ["broken", "unresolvable host — climbs the retry ladder"],
+      [sink.id]: ["warehouse", "batched · flushes on size 2 or a 5s window"],
+    };
+    ok(li, "Three destinations wired up");
+    li.querySelector(".note")?.remove();
+
+    li = step("Sending one event…");
+    const idem = `demo-${Date.now()}`;
+    const tracked = await post("/v1/track", {
+      type: "user.signed_up",
+      payload: { user: { email: "ada@example.com", id: 42 }, plan: "pro" },
+    }, { "Authorization": `Bearer ${src.write_key}`, "Idempotency-Key": idem });
+    eventId = tracked.id;
+    ok(li, `202 Accepted — event ${eventId}`);
+    li.querySelector(".note").textContent = "202, not 200: we have taken responsibility for it, not delivered it.";
+
+    li = step("Replaying the same Idempotency-Key…");
+    const dupRes = await fetch("/v1/track", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${src.write_key}`, "Idempotency-Key": idem },
+      body: JSON.stringify({ type: "user.signed_up", payload: { user: { email: "ada@example.com", id: 42 }, plan: "pro" } }),
+    });
+    const dup = await dupRes.json();
+    ok(li, `${dupRes.status} — same event ${dup.id}, no second set of deliveries`);
+    li.querySelector(".note").textContent = "The unique constraint on (source_id, idempotency_key) is the referee.";
+
+    $("table-card").classList.remove("hidden");
+    $("status").textContent = "polling…";
+    poll();
+    timer = setInterval(poll, 2000);
+  } catch (err) {
+    const li = step("Failed");
+    li.classList.add("fail");
+    li.firstChild.textContent = String(err.message || err);
+    $("run").disabled = false;
+  }
+}
+
+function render(ev) {
+  const order = Object.keys(names);
+  const sorted = [...ev.deliveries].sort((a, b) => order.indexOf(a.destination_id) - order.indexOf(b.destination_id));
+  rows.innerHTML = "";
+  for (const d of sorted) {
+    const [name, desc] = names[d.destination_id] || [d.destination_id, ""];
+    const tr = document.createElement("tr");
+    const cell = (html) => { const td = document.createElement("td"); td.innerHTML = html; tr.appendChild(td); };
+    cell(`<span class="name">${name}</span><br><span class="desc">${desc}</span>`);
+    cell(`<code>${d.destination_type}</code>`);
+    cell(`<span class="pill s-${d.status}">${d.status}</span>`);
+    cell(`<span class="mono">${d.attempts}</span>`);
+    cell(`<span class="err">${d.last_error ? d.last_error.slice(0, 90) : ""}</span>`);
+    rows.appendChild(tr);
+  }
+  return ev.deliveries.every((d) => d.status === "delivered" || d.status === "dead");
+}
+
+async function poll() {
+  try {
+    const ev = await api(`/v1/events/${eventId}`);
+    if (render(ev)) {
+      clearInterval(timer);
+      $("status").textContent = "settled";
+      $("run").disabled = false;
+      const dead = ev.deliveries.some((d) => d.status === "dead");
+      const banner = $("settled");
+      banner.classList.remove("hidden");
+      banner.textContent = dead
+        ? "One destination exhausted its retries and dead-lettered. The other two delivered and never knew. That divergence is the whole point — and the dead one is recoverable with replay."
+        : "Everything delivered — no destination failed, so there is no retry ladder to watch here.";
+      if (dead) $("replay").classList.remove("hidden");
+    }
+  } catch (err) {
+    clearInterval(timer);
+    $("status").textContent = String(err.message || err);
+    $("run").disabled = false;
+  }
+}
+
+$("run").addEventListener("click", run);
+$("replay").addEventListener("click", async () => {
+  $("replay").disabled = true;
+  try {
+    const r = await post(`/v1/destinations/${brokenId}/replay`, {});
+    const li = step(`Replayed ${r.replayed} dead deliver${r.replayed === 1 ? "y" : "ies"} back to pending`,
+      "They will fail again — the destination is still returning 500. Replay is the lever you pull once it is genuinely fixed.");
+    li.classList.add("done");
+    $("settled").classList.add("hidden");
+    $("status").textContent = "polling…";
+    clearInterval(timer);
+    poll();
+    timer = setInterval(poll, 2000);
+  } finally {
+    $("replay").disabled = false;
+    $("replay").classList.add("hidden");
+  }
+});
+</script>
+</body>
+</html>
